@@ -80,6 +80,11 @@ export function createRealtime({ httpServer, db, auth, config, serializeNotifica
       });
     },
 
+    disconnectUser(userId) {
+      io.in(`user:${userId}`).disconnectSockets(true);
+      for (const res of streams.get(userId) ?? []) res.end();
+    },
+
     close() {
       for (const connections of streams.values()) for (const res of connections) res.end();
       return io.close();

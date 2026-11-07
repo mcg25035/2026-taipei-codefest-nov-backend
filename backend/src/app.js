@@ -18,6 +18,8 @@ import { notificationRoutes } from './routes/notifications.js';
 import { assistRoutes } from './routes/assists.js';
 import { piiRoutes } from './routes/pii.js';
 import { pushRoutes } from './routes/push.js';
+import { adminRoutes } from './routes/admin.js';
+import { createAudit } from './audit.js';
 import { questionRoutes } from './routes/questions.js';
 import { tagRoutes } from './routes/tags.js';
 import { publicRewardRoutes, publicRewardApiRoutes, rewardRoutes } from './routes/rewards.js';
@@ -48,6 +50,8 @@ export function createServer(overrides = {}) {
   const notifier = createNotifier({ db, config, getRealtime, push });
   const deps = {
     db, config, getRealtime, notifier, signatures, push,
+    audit: createAudit(db),
+    requireAdmin: auth.requireAdmin,
     classifier: config.classifierOverride ?? createClassifier(),
     serializers: createSerializers({ db, config, signatures }),
     rewards: createRewards({ db, config, notifier }),
@@ -83,6 +87,7 @@ export function createServer(overrides = {}) {
   api.use(rewardRoutes(deps));
   api.use(notificationRoutes(deps));
   api.use(pushRoutes(deps));
+  api.use('/admin', adminRoutes(deps));
   app.use('/api/v1', api);
 
   app.use(() => { throw notFound('找不到這個路徑'); });

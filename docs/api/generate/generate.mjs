@@ -59,7 +59,7 @@ function flatten(schema, prefix = '') {
 }
 const table = (rows) => ['| 欄位 | 型別 | 必填 | 說明 |', '|---|---|---|---|',
   ...rows.map((r) => `| \`${r.name}\` | ${r.type} | ${r.required ? '是' : ''} | ${cell(r.desc)} |`)].join('\n');
-const TAG_TITLES = { Session: '登入', Me: '個人資料', Push: '推播', Media: '媒體', Question: '問題', Answer: '回答與投票', Assist: '現場協助', PII: '個資標記', Reward: '獎勵', Notification: '通知', Realtime: 'SSE', Meta: '系統' };
+const TAG_TITLES = { Session: '登入', Me: '個人資料', Push: '推播', Media: '媒體', Question: '問題', Answer: '回答與投票', Assist: '現場協助', PII: '個資標記', Reward: '獎勵', Admin: '管理員', Notification: '通知', Realtime: 'SSE', Meta: '系統' };
 const out = [];
 const summary = ['| 方法 | 路徑 | 用途 | 需要 token |', '|---|---|---|---|'];
 const sections = {};

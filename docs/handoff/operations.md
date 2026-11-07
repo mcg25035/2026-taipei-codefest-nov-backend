@@ -21,6 +21,8 @@
 | `PORT` | `5121` | 要和 `frpc.toml` 的 `localPort` 一致 |
 | `PUBLIC_BASE_URL` | `https://tpcodefest.mcloudtw.com` | 媒體網址的前綴。代理沒有傳 HTTPS 資訊，**不設定會變成 `http://`** |
 | `FCM_SERVICE_ACCOUNT_FILE` | 金鑰檔的路徑 | 不設定就不發推播，也不會報錯 |
+| `ADMIN_TOWNPASS_IDS` | 逗號分隔的 ID | 登入時取得管理員身份。**不要寫進 repo**，目前知道 ID 就能登入 |
+| `BOT_TOWNPASS_IDS` | 逗號分隔的 ID | 登入時取得機器人身份 |
 | `DATA_DIR` | 預設 `./data` | 資料庫和媒體檔 |
 | `CORS_ORIGIN` | 預設 `*` | 正式上線要改成前端網域 |
 | `FCM_CHANNEL_ID` | 預設值 | 要和 App 的通知通道一致 |
@@ -72,7 +74,7 @@ cd backend && npm ci && npm test
 
 **清空重來：** 停止伺服器後刪除 `data/`，啟動時會自動重建。所有帳號、問題和推播 token 都會消失；前端登入和載入時會重新建立帳號和 token。
 
-**改資料表：** 沒有遷移機制。啟動時只會建立不存在的資料表，既有資料表新增欄位不會生效，要自己寫 `ALTER TABLE`，或清空重來。
+**改資料表：** 沒有通用的遷移機制。啟動時會建立不存在的資料表；既有資料表新增欄位時，要在 `src/db.js` 的 `openDatabase` 補 `ALTER TABLE`，或清空重來。
 
 ## 常見問題
 

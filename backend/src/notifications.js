@@ -71,6 +71,7 @@ export function createNotifier({ db, config, getRealtime, push }) {
       AND nearby_notifications_enabled = 1
       AND location_sharing != 'off'
       AND trust_score >= @minTrust
+      AND banned_at IS NULL
       AND last_lat IS NOT NULL
       AND location_updated_at >= @fresh
       AND (last_nearby_notified_at IS NULL OR last_nearby_notified_at <= @throttle)

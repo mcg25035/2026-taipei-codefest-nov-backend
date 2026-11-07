@@ -12,6 +12,8 @@ function loadServiceAccount(env) {
   return account;
 }
 
+const idList = (value) => (value ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+
 export function loadConfig(overrides = {}) {
   const env = process.env;
   const corsOrigin = env.CORS_ORIGIN?.trim() || '*';
@@ -21,6 +23,9 @@ export function loadConfig(overrides = {}) {
     dataDir: env.DATA_DIR || './data',
     publicBaseUrl: env.PUBLIC_BASE_URL?.replace(/\/$/, '') || null,
     corsOrigin: corsOrigin === '*' ? '*' : corsOrigin.split(',').map((s) => s.trim()),
+    // 目前相信前端傳來的 ID；這些名單內的 ID 登入時會取得對應身份。
+    adminTownpassIds: idList(env.ADMIN_TOWNPASS_IDS),
+    botTownpassIds: idList(env.BOT_TOWNPASS_IDS),
     sessionTtlDays: 30,
     heartbeatSeconds: 60,
     push: {

@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
+import Database from 'better-sqlite3';
 import sharp from 'sharp';
 import { io } from 'socket.io-client';
+import { openDatabase } from '../src/db.js';
 import { TAIPEI, startTestServer } from './helpers.js';
 
 let t;
@@ -1463,4 +1466,227 @@ describe('自訂標籤', () => {
       socket.disconnect();
     }
   }));
+});
+
+describe('身份與管理員', () => {
+  const withServer = async (run) => {
+    const s = await startTestServer({ adminTownpassIds: ['root'], botTownpassIds: ['helper-bot'] });
+    try {
+      const session = async (id) => {
+        const res = await s.call('POST', '/sessions', { body: { townpass_user_id: id, nickname: id } });
+        return { token: res.body.data.token, user: res.body.data.user };
+      };
+      await run(s, await session('root'), session);
+    } finally {
+      await s.stop();
+    }
+  };
+  const create = async (s, user, extra = {}) => (await s.call('POST', '/questions', { token: user.token, body: s.question(extra) })).body.data;
+  const reply = async (s, user, id, body = '回答') => (await s.call('POST', '/questions/{question_id}/answers', { token: user.token, params: { question_id: id }, body: { body } })).body.data;
+  const auditOf = async (s, admin, query = {}) => (await s.call('GET', '/admin/audit-log', { token: admin.token, query })).body.data;
+
+  test('身份由名單決定，前端不能自己宣告；Bot 回傳身份且可正常使用', async () => withServer(async (s, admin, session) => {
+    assert.equal(admin.user.role, 'admin');
+    const bot = await session('helper-bot');
+    assert.equal(bot.user.role, 'bot');
+    const forged = await s.call('POST', '/sessions', { body: { townpass_user_id: 'attacker', nickname: 'x', role: 'admin' } });
+    assert.equal(forged.body.data.user.role, 'user');
+
+    const asker = await session('asker');
+    const q = await create(s, asker);
+    const a = await reply(s, bot, q.id, 'Bot 的回答');
+    assert.equal(a.author.role, 'bot');
+    const list = await s.call('GET', '/questions/{question_id}/answers', { token: asker.token, params: { question_id: q.id } });
+    assert.equal(list.body.data[0].author.role, 'bot');
+    const vote = await s.call('PUT', '/answers/{answer_id}/vote', { token: bot.token, params: { answer_id: a.id }, body: { value: 1 } });
+    assert.equal(vote.status, 200);
+    const accepted = await s.call('POST', '/answers/{answer_id}/accept', { token: asker.token, params: { answer_id: a.id } });
+    assert.equal(accepted.status, 200);
+    assert.equal((await s.call('GET', '/users/{user_id}', { params: { user_id: bot.user.id } })).body.data.role, 'bot');
+  }));
+
+  test('非管理員不能用任何管理員 API，也看不到可信度評分', async () => withServer(async (s, admin, session) => {
+    const user = await session('normal');
+    const q = await create(s, user);
+    const calls = [
+      ['GET', '/admin/users', {}],
+      ['GET', '/admin/audit-log', {}],
+      ['GET', '/admin/pii-reports', {}],
+      ['PUT', '/admin/users/{user_id}/role', { params: { user_id: admin.user.id }, body: { role: 'user' } }],
+      ['POST', '/admin/users/{user_id}/ban', { params: { user_id: admin.user.id }, body: {} }],
+      ['POST', '/admin/users/{user_id}/unban', { params: { user_id: admin.user.id } }],
+      ['PATCH', '/admin/questions/{question_id}', { params: { question_id: q.id }, body: { title: 'x' } }],
+      ['PATCH', '/admin/answers/{answer_id}', { params: { answer_id: 'a_1' }, body: { body: 'x' } }],
+    ];
+    for (const [method, path, options] of calls) {
+      assert.equal((await s.call(method, path, { token: user.token, ...options })).status, 403, path);
+      assert.equal((await s.call(method, path, options)).status, 401, path);
+    }
+    const bot = await session('helper-bot');
+    assert.equal((await s.call('GET', '/admin/users', { token: bot.token })).status, 403);
+    const me = await s.call('GET', '/me', { token: user.token });
+    assert.doesNotMatch(me.raw, /trust/);
+    const listed = await s.call('GET', '/admin/users', { token: admin.token, query: { q: 'normal' } });
+    assert.equal(listed.body.data[0].trust_score, 0);
+    assert.equal(listed.body.data[0].townpass_user_id, 'normal');
+  }));
+
+  test('刪除別人的問題：保留原內容、通知作者、內容真的消失', async () => withServer(async (s, admin, session) => {
+    const asker = await session('asker');
+    const helper = await session('helper');
+    const q = await create(s, asker, { body: '不當內容', tags: ['標籤'] });
+    await reply(s, helper, q.id, '底下的回答');
+    assert.equal((await s.call('DELETE', '/questions/{question_id}', { token: admin.token, params: { question_id: q.id } })).status, 204);
+    assert.equal((await s.call('GET', '/questions/{question_id}', { token: asker.token, params: { question_id: q.id } })).status, 404);
+    const [entry] = await auditOf(s, admin, { action: 'question.delete' });
+    assert.equal(entry.target_id, q.id);
+    assert.equal(entry.admin.id, admin.user.id);
+    assert.equal(entry.detail.body, '不當內容');
+    assert.equal(entry.detail.answers[0].body, '底下的回答');
+    const notes = (await s.call('GET', '/notifications', { token: asker.token })).body.data;
+    assert.ok(notes.some((n) => n.type === 'content_moderated'));
+  }));
+
+  test('稽核不保留精確座標', async () => withServer(async (s, admin, session) => {
+    const asker = await session('asker');
+    const q = await create(s, asker, { location_sharing: 'exact', location: TAIPEI });
+    await s.call('DELETE', '/questions/{question_id}', { token: admin.token, params: { question_id: q.id } });
+    assert.equal(JSON.stringify(await auditOf(s, admin)).includes(String(TAIPEI.lat)), false);
+  }));
+
+  test('可刪除已採納的回答：不收回積分，問題維持已解決', async () => withServer(async (s, admin, session) => {
+    const asker = await session('asker');
+    const helper = await session('helper');
+    const q = await create(s, asker);
+    const a = await reply(s, helper, q.id);
+    await s.call('POST', '/answers/{answer_id}/accept', { token: asker.token, params: { answer_id: a.id } });
+    assert.equal((await s.call('DELETE', '/answers/{answer_id}', { token: helper.token, params: { answer_id: a.id } })).status, 409);
+    assert.equal((await s.call('DELETE', '/answers/{answer_id}', { token: admin.token, params: { answer_id: a.id } })).status, 204);
+    const after = (await s.call('GET', '/questions/{question_id}', { token: asker.token, params: { question_id: q.id } })).body.data;
+    assert.equal(after.status, 'resolved');
+    assert.equal(after.accepted_answer_id, null);
+    assert.equal(after.answer_count, 0);
+    assert.equal((await s.call('GET', '/me', { token: helper.token })).body.data.points, 10);
+    const [entry] = await auditOf(s, admin, { action: 'answer.delete' });
+    assert.equal(entry.detail.was_accepted, true);
+  }));
+
+  test('修改內容：記錄前後內容，自動標題同步；待決定的個資標記要先處理', async () => withServer(async (s, admin, session) => {
+    const asker = await session('asker');
+    const helper = await session('helper');
+    const q = await create(s, asker, { body: '原本的內容' });
+    const edit = (body) => s.call('PATCH', '/admin/questions/{question_id}', { token: admin.token, params: { question_id: q.id }, body });
+    const res = await edit({ body: '修改後的內容' });
+    assert.equal(res.status, 200, res.raw);
+    assert.equal(res.body.data.body, '修改後的內容');
+    assert.equal(res.body.data.title, '修改後的內容');
+    assert.equal((await edit({})).status, 400);
+    assert.equal((await edit({ title: '' })).status, 400);
+    const [entry] = await auditOf(s, admin, { target_id: q.id });
+    assert.deepEqual(entry.detail.before.body, '原本的內容');
+    assert.deepEqual(entry.detail.after.body, '修改後的內容');
+
+    const a = await reply(s, helper, q.id, '原回答');
+    const editA = await s.call('PATCH', '/admin/answers/{answer_id}', { token: admin.token, params: { answer_id: a.id }, body: { body: '新回答' } });
+    assert.equal(editA.body.data.body, '新回答');
+    assert.ok((await s.call('GET', '/notifications', { token: helper.token })).body.data.some((n) => n.type === 'content_moderated'));
+
+    await s.call('POST', '/pii-reports', { token: helper.token, body: { target_type: 'question', target_id: q.id, text_ranges: [{ start: 0, end: 1 }] } });
+    assert.equal((await edit({ body: '再改一次' })).status, 409);
+  }));
+
+  test('分類、標籤、已解決、個資決定都能代為處理，也都有紀錄', async () => withServer(async (s, admin, session) => {
+    const asker = await session('asker');
+    const reporter = await session('reporter');
+    const q = await create(s, asker, { category: 'other', tags: ['舊標籤'], body: '電話0912' });
+    const id = { question_id: q.id };
+    assert.equal((await s.call('PUT', '/questions/{question_id}/category', { token: admin.token, params: id, body: { category: 'uncategorized' } })).body.data.category, 'uncategorized');
+    assert.deepEqual((await s.call('PUT', '/questions/{question_id}/tags', { token: admin.token, params: id, body: { tags: ['新標籤'] } })).body.data.tags, ['新標籤']);
+
+    const report = await s.call('POST', '/pii-reports', { token: reporter.token, body: { target_type: 'question', target_id: q.id, text_ranges: [{ start: 2, end: 6 }] } });
+    const hidden = await s.call('GET', '/questions/{question_id}', { token: reporter.token, params: id });
+    assert.equal(hidden.body.data.body, null);
+    assert.equal((await s.call('GET', '/questions/{question_id}', { token: admin.token, params: id })).body.data.body, '電話0912', '管理員要看得到才能判斷');
+    const pending = await s.call('GET', '/admin/pii-reports', { token: admin.token, query: { status: 'pending' } });
+    assert.equal(pending.body.data[0].id, report.body.data.id);
+    const done = await s.call('POST', '/pii-reports/{report_id}/accept', { token: admin.token, params: { report_id: report.body.data.id } });
+    assert.equal(done.status, 200, done.raw);
+    assert.equal((await s.call('GET', '/questions/{question_id}', { token: reporter.token, params: id })).body.data.body, '電話████');
+    assert.equal((await s.call('POST', '/questions/{question_id}/resolve', { token: admin.token, params: id })).body.data.status, 'resolved');
+
+    const actions = (await auditOf(s, admin)).map((e) => e.action);
+    for (const action of ['question.category', 'question.tags', 'pii.accept', 'question.resolve']) assert.ok(actions.includes(action), action);
+    assert.equal((await s.call('GET', '/admin/audit-log', { token: admin.token, query: { limit: '1' } })).body.next_cursor !== null, true);
+  }));
+
+  test('一般使用者自己的操作不會進稽核', async () => withServer(async (s, admin, session) => {
+    const asker = await session('asker');
+    const q = await create(s, asker);
+    await s.call('DELETE', '/questions/{question_id}', { token: asker.token, params: { question_id: q.id } });
+    assert.deepEqual(await auditOf(s, admin), []);
+  }));
+
+  test('設定身份：不能改自己，名單內的 ID 登入時恢復', async () => withServer(async (s, admin, session) => {
+    const user = await session('future-bot');
+    const set = (id, role) => s.call('PUT', '/admin/users/{user_id}/role', { token: admin.token, params: { user_id: id }, body: { role } });
+    assert.equal((await set(user.user.id, 'bot')).body.data.role, 'bot');
+    assert.equal((await s.call('GET', '/me', { token: user.token })).body.data.role, 'bot');
+    assert.equal((await set(user.user.id, 'superuser')).status, 400);
+    assert.equal((await set(admin.user.id, 'user')).status, 403);
+    assert.equal((await set('u_none', 'bot')).status, 404);
+    const [entry] = await auditOf(s, admin, { action: 'user.role' });
+    assert.deepEqual(entry.detail, { before: 'user', after: 'bot' });
+  }));
+
+  test('停權：立即登出、不能重新登入、中斷連線、不再收附近通知；解除後恢復', async () => withServer(async (s, admin, session) => {
+    const user = await session('troll');
+    await s.call('POST', '/me/heartbeat', { token: user.token, body: { app_state: 'background', location: TAIPEI } });
+    await s.call('PUT', '/push-tokens/{token}', { token: user.token, params: { token: 'tok-1' }, body: { platform: 'android' } });
+    const socket = await new Promise((done, fail) => {
+      const c = io(s.baseUrl, { auth: { token: user.token }, transports: ['websocket'], reconnection: false });
+      c.once('connect', () => done(c));
+      c.once('connect_error', fail);
+    });
+    const dropped = new Promise((done) => socket.once('disconnect', done));
+    const ban = (id) => s.call('POST', '/admin/users/{user_id}/ban', { token: admin.token, params: { user_id: id }, body: { reason: '發廣告' } });
+    const res = await ban(user.user.id);
+    assert.equal(res.status, 200, res.raw);
+    assert.equal(res.body.data.ban_reason, '發廣告');
+    assert.ok(res.body.data.banned_at);
+    await dropped;
+    assert.equal((await s.call('GET', '/me', { token: user.token })).status, 401);
+    const relogin = await s.call('POST', '/sessions', { body: { townpass_user_id: 'troll' } });
+    assert.equal(relogin.status, 403);
+    assert.equal(relogin.body.error.code, 'ACCOUNT_BANNED');
+    assert.equal(s.server.db.prepare('SELECT COUNT(*) AS n FROM push_tokens WHERE user_id = ?').get(user.user.id).n, 0);
+    assert.equal((await ban(admin.user.id)).status, 403, '不能停權自己');
+
+    const asker = await session('asker');
+    const q = await create(s, asker, { location_sharing: 'approximate', location: TAIPEI });
+    assert.equal(s.server.db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE question_id = ? AND type = 'nearby_question'").get(q.id).n, 0);
+
+    assert.equal((await s.call('POST', '/admin/users/{user_id}/unban', { token: admin.token, params: { user_id: user.user.id } })).body.data.banned_at, null);
+    assert.equal((await s.call('POST', '/sessions', { body: { townpass_user_id: 'troll' } })).status, 201);
+    socket.disconnect();
+  }));
+
+  test('舊資料庫升級時會補上身份欄位', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codefest-migrate-'));
+    try {
+      const old = new Database(path.join(dir, 'app.db'));
+      old.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, townpass_user_id TEXT NOT NULL UNIQUE, nickname TEXT NOT NULL, points INTEGER NOT NULL DEFAULT 0,
+        trust_score INTEGER NOT NULL DEFAULT 0, languages TEXT NOT NULL, nearby_notifications_enabled INTEGER NOT NULL DEFAULT 1, nearby_radius_m INTEGER NOT NULL DEFAULT 1000,
+        location_sharing TEXT NOT NULL DEFAULT 'approximate', last_lat REAL, last_lng REAL, location_updated_at TEXT, last_nearby_notified_at TEXT, created_at TEXT NOT NULL);
+        INSERT INTO users (id, townpass_user_id, nickname, languages, created_at) VALUES ('u_old', 'old', '舊使用者', '[]', '2026-01-01');`);
+      old.close();
+      const db = openDatabase(dir);
+      const row = db.prepare("SELECT role, banned_at FROM users WHERE id = 'u_old'").get();
+      assert.deepEqual({ ...row }, { role: 'user', banned_at: null });
+      db.close();
+      const again = openDatabase(dir);
+      again.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

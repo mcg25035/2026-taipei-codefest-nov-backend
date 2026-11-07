@@ -1,6 +1,6 @@
 import { distanceM, publicDistanceM } from './geo.js';
 
-export const publicUser = (row) => ({ id: row.id, nickname: row.nickname, points: row.points });
+export const publicUser = (row) => ({ id: row.id, nickname: row.nickname, points: row.points, role: row.role });
 
 // 可信度評分和倒讚數只留在後端，不可加進任何 serializer。
 export const meUser = (row) => ({
@@ -55,7 +55,8 @@ export function createSerializers({ db, config, signatures }) {
     };
   };
 
-  const questionVisibility = (req, row) => visibility('question', row.id, row.author_id === req.user?.id);
+  const isAdmin = (req) => req.user?.role === 'admin';
+  const questionVisibility = (req, row) => visibility('question', row.id, row.author_id === req.user?.id || isAdmin(req));
 
   const canClaim = (req, row, viewerPoint) => {
     const user = req.user;
@@ -116,7 +117,7 @@ export function createSerializers({ db, config, signatures }) {
   });
 
   const answer = (req, row) => {
-    const canSeeHidden = row.author_id === req.user.id || questionById.get(row.question_id).author_id === req.user.id;
+    const canSeeHidden = row.author_id === req.user.id || questionById.get(row.question_id).author_id === req.user.id || isAdmin(req);
     const seen = visibility('answer', row.id, canSeeHidden);
     return {
       id: row.id,

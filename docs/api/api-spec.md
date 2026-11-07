@@ -1,6 +1,6 @@
 # 後端 API 規格
 
-這份文件列出後端全部 39 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
+這份文件列出後端全部 47 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
 
 - **Base URL：** `https://tpcodefest.mcloudtw.com/api/v1`
 - **平台：** 只支援 Android
@@ -41,7 +41,8 @@ curl -X POST $BASE/questions \
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
 - **標籤：** 除了分類，問題可帶最多 5 個自訂標籤。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
 - **媒體：** 先呼叫 `POST /media` 取得 `id`，再放進問題或回答的 `media_ids`。超過 24 小時未使用的檔案會被刪除。
-- **不會回傳的資料：** 倒讚數和可信度評分只留在後端。
+- **不會回傳的資料：** 倒讚數只留在後端；可信度評分只有管理員 API 看得到。
+- **身份：** 使用者資料都有 `role`：`user`、`admin`、`bot`。`bot` 的權限和一般使用者相同，前端要標示它是機器人。
 
 ### 錯誤格式
 
@@ -58,6 +59,7 @@ curl -X POST $BASE/questions \
 | 403 | `SELF_ACTION_NOT_ALLOWED` | 採納、投票或接案的對象是自己 |
 | 403 | `LOCATION_SHARING_OFF` | 位置分享已關閉，不能接現場任務 |
 | 403 | `ASSIST_NOT_ALLOWED` | 目前不能接現場任務 |
+| 403 | `ACCOUNT_BANNED` | 帳號已被停權 |
 | 404 | `NOT_FOUND` | 不存在或已撤回 |
 | 409 | `ALREADY_ACCEPTED` | 問題已有採納的回答 |
 | 409 | `ANSWER_ACCEPTED` | 已採納的回答不能刪除 |
@@ -106,7 +108,7 @@ socket.on('answers.changed', ({ question_id }) => refetchAnswers(question_id));
 
 `GET /notifications/stream` 只傳 `notification.created`，內容是 [Notification](#notification)。WebView 請用 `@microsoft/fetch-event-source`，因為原生 `EventSource` 不能帶 `Authorization` 標頭。
 
-通知的 `type`：`nearby_question`、`new_answer`、`answer_accepted`、`assist_claimed`、`assist_arrived`、`assist_completed`、`assist_cancelled`、`pii_report_pending`、`pii_report_resolved`、`badge_earned`。
+通知的 `type`：`nearby_question`、`new_answer`、`answer_accepted`、`assist_claimed`、`assist_arrived`、`assist_completed`、`assist_cancelled`、`pii_report_pending`、`pii_report_resolved`、`badge_earned`、`content_moderated`。
 
 SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一則通知，所以收到 SSE 時只更新畫面，不要再呼叫 `notify`。
 
@@ -165,6 +167,14 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 | POST | `/classify` | 試算問題分類 | 否 |
 | PUT | `/push-tokens/{token}` | 註冊或更新此裝置的 FCM token | 是 |
 | DELETE | `/push-tokens/{token}` | 取消此裝置的推播 | 是 |
+| GET | `/admin/users` | 列出使用者 | 是 |
+| PUT | `/admin/users/{user_id}/role` | 設定使用者身份 | 是 |
+| POST | `/admin/users/{user_id}/ban` | 停權 | 是 |
+| POST | `/admin/users/{user_id}/unban` | 解除停權 | 是 |
+| PATCH | `/admin/questions/{question_id}` | 修改問題內容 | 是 |
+| PATCH | `/admin/answers/{answer_id}` | 修改回答內容 | 是 |
+| GET | `/admin/pii-reports` | 列出所有個資標記 | 是 |
+| GET | `/admin/audit-log` | 稽核紀錄 | 是 |
 | GET | `/meta` | 前端需要的列舉與限制 | 否 |
 | GET | `/healthz` | 健康檢查 | 否 |
 
@@ -177,6 +187,7 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 
 前端先向 App 取得 `userinfo`，再只傳下列欄位。不要傳 `realName`、`idNo`、`phoneNo` 等個資。
 這不是真正的身分驗證：`userinfo` 沒有 token 或簽章，後端無法確認真偽。
+管理員和機器人由伺服器名單或管理員指定，不能由前端宣告。已停權的帳號回傳 403 `ACCOUNT_BANNED`。
 
 **請求內容**（`application/json`）
 
@@ -196,7 +207,7 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 | `expires_at` | string（時間） | 是 |  |
 | `user` | [Me](#me) | 是 |  |
 
-- 錯誤：`400`
+- 錯誤：`400`、`403`
 
 ## 個人資料
 
@@ -434,7 +445,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 撤回問題。
 
-僅限發問者。問題與其媒體檔立即不可存取，進行中的現場協助會一併取消。
+僅限發問者或管理員。問題與其媒體檔立即不可存取，進行中的現場協助會一併取消。管理員的操作會保留原內容在稽核紀錄。
 
 **參數**
 
@@ -451,7 +462,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 發問者標記問題已解決。
 
-僅限發問者，不需要請求內容，也不需要留言或採納回答，沒有任何回答時也能使用。不會發積分。
+僅限發問者或管理員，不需要請求內容，也不需要留言或採納回答，沒有任何回答時也能使用。不會發積分。
 已解決的問題回傳 409 `INVALID_STATE`；現場協助進行中回傳 409 `ASSIST_ACTIVE`。
 標記後，所有人仍可回答和按讚，發問者也仍可採納回答。
 
@@ -471,7 +482,8 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 設定問題的自訂標籤。
 
 傳入完整的標籤清單，會取代現有標籤。
-發問者可以新增或移除；其他登入者只能新增，移除別人的標籤回傳 403。低可信度帳號回傳 403。
+發問者和管理員可以新增或移除；其他登入者只能新增，移除別人的標籤回傳 403。低可信度帳號回傳 403。
+管理員的修改會留下稽核紀錄。
 最多 5 個，每個 1 到 20 字，只能有文字、數字、空白、`-`、`_`、`·`；開頭的 `#` 會被移除。重複的標籤會合併。
 
 **參數**
@@ -523,6 +535,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 任何登入者都能替 `uncategorized` 的問題分類；已分類的問題回傳 409 `INVALID_STATE`。
 發問者隨時可以修改自己的問題。不能改回 `uncategorized`，低可信度帳號回傳 403。
+管理員可以修改任何問題，也能改回 `uncategorized`，操作會留下稽核紀錄。
 分類不會獲得積分。可用 `GET /questions?category=uncategorized` 列出待分類的問題。
 
 **參數**
@@ -637,7 +650,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 刪除自己的回答。
 
-已被採納的回答不能刪除，回傳 409 `ANSWER_ACCEPTED`。
+已被採納的回答不能刪除，回傳 409 `ANSWER_ACCEPTED`。管理員可以刪除任何回答，已發出的積分不收回，操作會保留原內容在稽核紀錄。
 
 **參數**
 
@@ -883,7 +896,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 同意遮蔽。
 
-僅限發問者。圖片會在伺服器上覆蓋不透明色塊並產生新檔與新 ID，原檔刪除；文字逐字換成 `█`，字數不變；語音和影片整段移除。此操作不可逆。
+僅限發問者或管理員。圖片會在伺服器上覆蓋不透明色塊並產生新檔與新 ID，原檔刪除；文字逐字換成 `█`，字數不變；語音和影片整段移除。此操作不可逆。
 
 **參數**
 
@@ -900,7 +913,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 拒絕遮蔽並恢復顯示。
 
-僅限發問者。若同一內容還有其他待決定的標記，內容會繼續隱藏。
+僅限發問者或管理員。若同一內容還有其他待決定的標記，內容會繼續隱藏。
 
 **參數**
 
@@ -977,6 +990,219 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 - 錯誤：`401`
 
+## 管理員
+
+### GET /admin/users
+
+列出使用者。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `role` | query | [UserRole](#userrole) |  |  |
+| `q` | query | string |  | 搜尋暱稱或城市通使用者 ID |
+| `cursor` | query | string |  |  |
+| `limit` | query | integer |  | 最小 1，最大 50，預設 `20` |
+
+**回應**
+
+- `200`：OK；`data` 是 [AdminUser](#adminuser)[]，另有 `next_cursor`（string \| null）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `id` | string | 是 |  |
+| `nickname` | string | 是 |  |
+| `points` | integer | 是 |  |
+| `role` | [UserRole](#userrole) | 是 |  |
+| `languages` | [LanguageTag](#languagetag)[] | 是 |  |
+| `nearby_notifications_enabled` | boolean | 是 |  |
+| `nearby_radius_m` | integer | 是 |  |
+| `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |
+| `townpass_user_id` | string | 是 |  |
+| `trust_score` | integer | 是 |  |
+| `banned_at` | string（時間） \| null | 是 |  |
+| `ban_reason` | string \| null | 是 |  |
+| `created_at` | string（時間） | 是 |  |
+
+- 錯誤：`400`、`401`、`403`
+
+### PUT /admin/users/{user_id}/role
+
+設定使用者身份。
+
+不能變更自己的身份。名單內的 ID 下次登入時會依名單恢復。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `user_id` | 路徑 | string | 是 |  |
+
+**請求內容**（`application/json`）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `role` | [UserRole](#userrole) | 是 |  |
+
+**回應**
+
+- `200`：OK；`data` 是 [AdminUser](#adminuser)
+- 錯誤：`400`、`401`、`403`、`404`
+
+### POST /admin/users/{user_id}/ban
+
+停權。
+
+立即登出、中斷即時連線並移除推播 token，也不能重新登入。不能停權自己。已發布的內容不會自動移除。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `user_id` | 路徑 | string | 是 |  |
+
+**請求內容**（`application/json`，選填）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `reason` | string |  | 最長 200 字 |
+
+**回應**
+
+- `200`：OK；`data` 是 [AdminUser](#adminuser)
+- 錯誤：`401`、`403`、`404`
+
+### POST /admin/users/{user_id}/unban
+
+解除停權。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `user_id` | 路徑 | string | 是 |  |
+
+**回應**
+
+- `200`：OK；`data` 是 [AdminUser](#adminuser)
+- 錯誤：`401`、`403`、`404`
+
+### PATCH /admin/questions/{question_id}
+
+修改問題內容。
+
+修改前後都會留在稽核紀錄，並通知作者。有待決定的文字個資標記時回傳 409，要先處理標記。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `question_id` | 路徑 | string | 是 |  |
+
+**請求內容**（`application/json`）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `title` | string |  | 最短 1，最長 80 字 |
+| `body` | string \| null |  | 最長 5000 字 |
+
+**回應**
+
+- `200`：OK；`data` 是 [QuestionDetail](#questiondetail)
+- 錯誤：`400`、`401`、`403`、`404`、`409`
+
+### PATCH /admin/answers/{answer_id}
+
+修改回答內容。
+
+修改前後都會留在稽核紀錄，並通知作者。有待決定的文字個資標記時回傳 409。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `answer_id` | 路徑 | string | 是 |  |
+
+**請求內容**（`application/json`）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `body` | string | 是 | 最短 1，最長 5000 字 |
+
+**回應**
+
+- `200`：OK；`data` 是 [Answer](#answer)
+- 錯誤：`400`、`401`、`403`、`404`、`409`
+
+### GET /admin/pii-reports
+
+列出所有個資標記。
+
+發問者沒回應時內容會一直隱藏，管理員可從這裡找到並處理。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `status` | query | [PiiReportStatus](#piireportstatus) |  |  |
+| `cursor` | query | string |  |  |
+| `limit` | query | integer |  | 最小 1，最大 50，預設 `20` |
+
+**回應**
+
+- `200`：OK；`data` 是 [PiiReport](#piireport)[]，另有 `next_cursor`（string \| null）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `id` | string | 是 |  |
+| `status` | [PiiReportStatus](#piireportstatus) | 是 |  |
+| `target_type` | `question` \| `answer` | 是 |  |
+| `target_id` | string | 是 |  |
+| `question_id` | string | 是 |  |
+| `media_id` | string \| null |  |  |
+| `text_field` | `body` \| `title` \| `null` |  |  |
+| `regions` | [ImageRegion](#imageregion)[] |  |  |
+| `text_ranges` | [TextRange](#textrange)[] |  |  |
+| `original_text` | string \| null |  | 僅 pending 時回傳給發問者 |
+| `preview_url` | string（URL） \| null |  | 僅 pending 時回傳的短效連結 |
+| `created_at` | string（時間） | 是 |  |
+| `resolved_at` | string（時間） \| null |  |  |
+
+- 錯誤：`400`、`401`、`403`
+
+### GET /admin/audit-log
+
+稽核紀錄。
+
+管理員的刪除和修改都會記錄，由新到舊，紀錄不能修改或刪除。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `action` | query | string |  |  |
+| `target_id` | query | string |  |  |
+| `admin_id` | query | string |  |  |
+| `cursor` | query | string |  |  |
+| `limit` | query | integer |  | 最小 1，最大 50，預設 `20` |
+
+**回應**
+
+- `200`：OK；`data` 是 [AuditEntry](#auditentry)[]，另有 `next_cursor`（string \| null）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `id` | string | 是 |  |
+| `admin` | [PublicUser](#publicuser) | 是 |  |
+| `action` | string | 是 |  |
+| `target_type` | `question` \| `answer` \| `user` \| `pii_report` | 是 |  |
+| `target_id` | string | 是 |  |
+| `detail` | object | 是 | 刪除時保留原內容，修改時有 before 和 after |
+| `created_at` | string（時間） | 是 |  |
+
+- 錯誤：`400`、`401`、`403`
+
 ## 通知
 
 ### GET /notifications
@@ -998,7 +1224,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
 | `id` | string | 是 |  |
-| `type` | `nearby_question` \| `new_answer` \| `answer_accepted` \| `assist_claimed` \| `assist_arrived` \| `assist_completed` \| `assist_cancelled` \| `pii_report_pending` \| `pii_report_resolved` \| `badge_earned` | 是 |  |
+| `type` | `nearby_question` \| `new_answer` \| `answer_accepted` \| `assist_claimed` \| `assist_arrived` \| `assist_completed` \| `assist_cancelled` \| `pii_report_pending` \| `pii_report_resolved` \| `content_moderated` \| `badge_earned` | 是 |  |
 | `title` | string | 是 |  |
 | `body` | string | 是 |  |
 | `question_id` | string \| null |  |  |
@@ -1128,6 +1354,12 @@ BCP 47 語言標籤
 | `district` | string \| null |  |  |
 | `distance_m` | integer \| null |  | 查詢時有帶座標才有值 |
 
+### UserRole
+
+`user` 一般使用者；`admin` 管理員；`bot` 機器人，權限和一般使用者相同，前端應標示。
+
+型別：`user` \| `admin` \| `bot`
+
 ### PublicUser
 
 | 欄位 | 型別 | 必填 | 說明 |
@@ -1135,6 +1367,39 @@ BCP 47 語言標籤
 | `id` | string | 是 |  |
 | `nickname` | string | 是 |  |
 | `points` | integer | 是 |  |
+| `role` | [UserRole](#userrole) | 是 |  |
+
+### AdminUser
+
+只有管理員 API 會回傳，包含可信度評分。
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `id` | string | 是 |  |
+| `nickname` | string | 是 |  |
+| `points` | integer | 是 |  |
+| `role` | [UserRole](#userrole) | 是 |  |
+| `languages` | [LanguageTag](#languagetag)[] | 是 |  |
+| `nearby_notifications_enabled` | boolean | 是 |  |
+| `nearby_radius_m` | integer | 是 |  |
+| `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |
+| `townpass_user_id` | string | 是 |  |
+| `trust_score` | integer | 是 |  |
+| `banned_at` | string（時間） \| null | 是 |  |
+| `ban_reason` | string \| null | 是 |  |
+| `created_at` | string（時間） | 是 |  |
+
+### AuditEntry
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `id` | string | 是 |  |
+| `admin` | [PublicUser](#publicuser) | 是 |  |
+| `action` | string | 是 |  |
+| `target_type` | `question` \| `answer` \| `user` \| `pii_report` | 是 |  |
+| `target_id` | string | 是 |  |
+| `detail` | object | 是 | 刪除時保留原內容，修改時有 before 和 after |
+| `created_at` | string（時間） | 是 |  |
 
 ### Me
 
@@ -1143,6 +1408,7 @@ BCP 47 語言標籤
 | `id` | string | 是 |  |
 | `nickname` | string | 是 |  |
 | `points` | integer | 是 |  |
+| `role` | [UserRole](#userrole) | 是 |  |
 | `languages` | [LanguageTag](#languagetag)[] | 是 |  |
 | `nearby_notifications_enabled` | boolean | 是 |  |
 | `nearby_radius_m` | integer | 是 |  |
@@ -1155,6 +1421,7 @@ BCP 47 語言標籤
 | `id` | string | 是 |  |
 | `nickname` | string | 是 |  |
 | `points` | integer | 是 |  |
+| `role` | [UserRole](#userrole) | 是 |  |
 | `accepted_answer_count` | integer | 是 |  |
 | `completed_assist_count` | integer | 是 |  |
 | `badges` | [Badge](#badge)[] | 是 |  |
@@ -1378,7 +1645,7 @@ BCP 47 語言標籤
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
 | `id` | string | 是 |  |
-| `type` | `nearby_question` \| `new_answer` \| `answer_accepted` \| `assist_claimed` \| `assist_arrived` \| `assist_completed` \| `assist_cancelled` \| `pii_report_pending` \| `pii_report_resolved` \| `badge_earned` | 是 |  |
+| `type` | `nearby_question` \| `new_answer` \| `answer_accepted` \| `assist_claimed` \| `assist_arrived` \| `assist_completed` \| `assist_cancelled` \| `pii_report_pending` \| `pii_report_resolved` \| `content_moderated` \| `badge_earned` | 是 |  |
 | `title` | string | 是 |  |
 | `body` | string | 是 |  |
 | `question_id` | string \| null |  |  |

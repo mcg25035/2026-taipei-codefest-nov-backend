@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS users (
   nearby_notifications_enabled INTEGER NOT NULL DEFAULT 1,
   nearby_radius_m INTEGER NOT NULL DEFAULT 1000,
   location_sharing TEXT NOT NULL DEFAULT 'approximate',
+  role TEXT NOT NULL DEFAULT 'user',
+  banned_at TEXT,
+  ban_reason TEXT,
   last_lat REAL,
   last_lng REAL,
   location_updated_at TEXT,
@@ -91,6 +94,16 @@ CREATE TABLE IF NOT EXISTS question_tags (
   PRIMARY KEY (question_id, tag_key)
 );
 CREATE INDEX IF NOT EXISTS idx_question_tags_key ON question_tags (tag_key);
+CREATE TABLE IF NOT EXISTS admin_actions (
+  id TEXT PRIMARY KEY,
+  admin_id TEXT NOT NULL REFERENCES users(id),
+  action TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_actions_created ON admin_actions (created_at DESC, id DESC);
 CREATE TABLE IF NOT EXISTS assists (
   id TEXT PRIMARY KEY,
   question_id TEXT NOT NULL REFERENCES questions(id),
@@ -171,5 +184,10 @@ export function openDatabase(dataDir) {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+  // CREATE TABLE IF NOT EXISTS 不會替既有資料表加欄位，已上線的資料庫要另外補。
+  const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!userColumns.has('role')) db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
+  if (!userColumns.has('banned_at')) db.exec('ALTER TABLE users ADD COLUMN banned_at TEXT');
+  if (!userColumns.has('ban_reason')) db.exec('ALTER TABLE users ADD COLUMN ban_reason TEXT');
   return db;
 }

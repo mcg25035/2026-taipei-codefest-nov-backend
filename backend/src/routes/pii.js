@@ -35,7 +35,7 @@ function maskText(text, ranges) {
   return chars.join('');
 }
 
-export function piiRoutes({ db, config, notifier, getRealtime, hourlyLimiter, signatures, removeMediaFiles }) {
+export function piiRoutes({ db, config, notifier, getRealtime, hourlyLimiter, signatures, removeMediaFiles, audit, requireAdmin }) {
   const router = Router();
   const mediaDir = path.join(config.dataDir, 'media');
   const questionById = db.prepare('SELECT * FROM questions WHERE id = ?');
@@ -252,11 +252,19 @@ export function piiRoutes({ db, config, notifier, getRealtime, hourlyLimiter, si
     };
   };
 
-  router.get('/me/pii-reports', (req, res) => {
+  // 發問者看不到或很久沒回應時，內容會一直隱藏，所以管理員也要能看到全部。
+  router.get('/admin/pii-reports', requireAdmin, (req, res) => listReports(req, res, null));
+  router.get('/me/pii-reports', (req, res) => listReports(req, res, req.user.id));
+
+  function listReports(req, res, ownerId) {
     const limit = parseLimit(req.query);
     const cursor = decodeCursor(req.query.cursor);
-    const clauses = ['q.author_id = @user'];
-    const params = { user: req.user.id, limit: limit + 1 };
+    const clauses = [];
+    const params = { limit: limit + 1 };
+    if (ownerId) {
+      clauses.push('q.author_id = @user');
+      params.user = ownerId;
+    }
     if (req.query.status !== undefined) {
       params.status = requireEnum(req.query.status, ['pending', 'accepted', 'denied'], 'status');
       clauses.push('r.status = @status');
@@ -268,7 +276,7 @@ export function piiRoutes({ db, config, notifier, getRealtime, hourlyLimiter, si
     }
     const rows = db.prepare(`
       SELECT r.* FROM pii_reports r JOIN questions q ON q.id = r.question_id
-      WHERE ${clauses.join(' AND ')} ORDER BY r.created_at DESC, r.id DESC LIMIT @limit
+      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY r.created_at DESC, r.id DESC LIMIT @limit
     `).all(params);
     const page = rows.slice(0, limit);
     const last = page.at(-1);
@@ -276,24 +284,29 @@ export function piiRoutes({ db, config, notifier, getRealtime, hourlyLimiter, si
       data: page.map((row) => serialize(req, row)),
       next_cursor: rows.length > limit ? encodeCursor({ c: last.created_at, i: last.id }) : null,
     });
-  });
+  }
 
   const loadOwnReport = (req) => {
     const report = reportById.get(req.params.id);
     if (!report) throw notFound();
-    if (questionById.get(report.question_id).author_id !== req.user.id) throw forbidden('只有發問者可以決定');
+    if (questionById.get(report.question_id).author_id !== req.user.id && req.user.role !== 'admin') {
+      throw forbidden('只有發問者可以決定');
+    }
     return report;
   };
 
   router.post('/pii-reports/:id/accept', async (req, res) => {
     const report = loadOwnReport(req);
     if (report.status !== 'pending') throw invalidState();
-    res.json({ data: serialize(req, await accept(report.id)) });
+    const accepted = await accept(report.id);
+    if (req.user.role === 'admin') audit.record(req.user.id, 'pii.accept', 'pii_report', report.id, { question_id: report.question_id });
+    res.json({ data: serialize(req, accepted) });
   });
 
   router.post('/pii-reports/:id/deny', (req, res) => {
     const report = loadOwnReport(req);
     if (!resolve.run('denied', nowIso(), report.id).changes) throw invalidState();
+    if (req.user.role === 'admin') audit.record(req.user.id, 'pii.deny', 'pii_report', report.id, { question_id: report.question_id });
     finish(report, 'denied');
     res.json({ data: serialize(req, reportById.get(report.id)) });
   });

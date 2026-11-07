@@ -41,7 +41,8 @@ curl -X POST $BASE/questions \
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
 - **標籤：** 除了分類，問題可帶最多 5 個自訂標籤。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
 - **媒體：** 先呼叫 `POST /media` 取得 `id`，再放進問題或回答的 `media_ids`。超過 24 小時未使用的檔案會被刪除。
-- **不會回傳的資料：** 倒讚數和可信度評分只留在後端。
+- **不會回傳的資料：** 倒讚數只留在後端；可信度評分只有管理員 API 看得到。
+- **身份：** 使用者資料都有 `role`：`user`、`admin`、`bot`。`bot` 的權限和一般使用者相同，前端要標示它是機器人。
 
 ### 錯誤格式
 
@@ -58,6 +59,7 @@ curl -X POST $BASE/questions \
 | 403 | `SELF_ACTION_NOT_ALLOWED` | 採納、投票或接案的對象是自己 |
 | 403 | `LOCATION_SHARING_OFF` | 位置分享已關閉，不能接現場任務 |
 | 403 | `ASSIST_NOT_ALLOWED` | 目前不能接現場任務 |
+| 403 | `ACCOUNT_BANNED` | 帳號已被停權 |
 | 404 | `NOT_FOUND` | 不存在或已撤回 |
 | 409 | `ALREADY_ACCEPTED` | 問題已有採納的回答 |
 | 409 | `ANSWER_ACCEPTED` | 已採納的回答不能刪除 |
@@ -106,7 +108,7 @@ socket.on('answers.changed', ({ question_id }) => refetchAnswers(question_id));
 
 `GET /notifications/stream` 只傳 `notification.created`，內容是 [Notification](#notification)。WebView 請用 `@microsoft/fetch-event-source`，因為原生 `EventSource` 不能帶 `Authorization` 標頭。
 
-通知的 `type`：`nearby_question`、`new_answer`、`answer_accepted`、`assist_claimed`、`assist_arrived`、`assist_completed`、`assist_cancelled`、`pii_report_pending`、`pii_report_resolved`、`badge_earned`。
+通知的 `type`：`nearby_question`、`new_answer`、`answer_accepted`、`assist_claimed`、`assist_arrived`、`assist_completed`、`assist_cancelled`、`pii_report_pending`、`pii_report_resolved`、`badge_earned`、`content_moderated`。
 
 SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一則通知，所以收到 SSE 時只更新畫面，不要再呼叫 `notify`。
 

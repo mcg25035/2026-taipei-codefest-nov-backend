@@ -43,7 +43,7 @@ function parseQuestionLocation(body, level, mode) {
   return { approx: snap(location), exact: level === 'exact' || mode !== 'online' ? location : null };
 }
 
-export function questionRoutes({ db, config, serializers, notifier, getRealtime, limiter, removeMediaFiles, classifier }) {
+export function questionRoutes({ db, config, serializers, notifier, getRealtime, limiter, removeMediaFiles, classifier, audit }) {
   const router = Router();
   const byId = db.prepare('SELECT * FROM questions WHERE id = ?');
   const byRequest = db.prepare('SELECT * FROM questions WHERE author_id = ? AND client_request_id = ?');
@@ -237,12 +237,14 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
   router.post('/questions/:id/resolve', (req, res) => {
     const row = byId.get(req.params.id);
     if (!row) throw notFound();
-    if (row.author_id !== req.user.id) throw forbidden('只有發問者可以標記已解決');
+    const isAdmin = req.user.role === 'admin';
+    if (row.author_id !== req.user.id && !isAdmin) throw forbidden('只有發問者可以標記已解決');
     if (row.status === 'in_progress') throw new ApiError(409, 'ASSIST_ACTIVE', '現場協助進行中，請先確認完成或取消');
     if (row.status !== 'open') throw new ApiError(409, 'INVALID_STATE', '這個問題已經解決了');
     db.transaction(() => {
       markResolved.run(row.id);
       purgeNotificationLocation.run(row.id);
+      if (isAdmin) audit.record(req.user.id, 'question.resolve', 'question', row.id);
     })();
     getRealtime().questionChanged(row.id);
     getRealtime().feedChanged();
@@ -258,14 +260,17 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     if (!row) throw notFound();
     const tags = parseTags(requireBodyObject(req.body).tags ?? null);
     if (!Array.isArray(req.body.tags)) throw validationError('缺少 tags', { field: 'tags' });
-    if (row.author_id !== req.user.id) {
+    const isAdmin = req.user.role === 'admin';
+    if (row.author_id !== req.user.id && !isAdmin) {
       if (req.user.trust_score < config.trust.lowThreshold) throw forbidden('目前不能編輯標籤');
       const next = new Set(tags.map((t) => t.key));
       if (tagsOf.all(row.id).some((t) => !next.has(t.tag_key))) throw forbidden('只有發問者可以移除標籤');
     }
+    const previous = serializers.questionDetail(req, row).tags;
     db.transaction(() => {
       clearTags.run(row.id);
       tags.forEach(({ key, tag }, position) => insertTag.run(row.id, key, tag, position));
+      if (isAdmin) audit.record(req.user.id, 'question.tags', 'question', row.id, { before: previous, after: tags.map((t) => t.tag) });
     })();
     getRealtime().questionChanged(row.id);
     getRealtime().feedChanged();
@@ -278,13 +283,17 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
   router.put('/questions/:id/category', (req, res) => {
     const row = byId.get(req.params.id);
     if (!row) throw notFound();
-    const assignable = Object.keys(CATEGORIES).filter((c) => c !== 'uncategorized');
+    const isAdmin = req.user.role === 'admin';
+    const assignable = Object.keys(CATEGORIES).filter((c) => isAdmin || c !== 'uncategorized');
     const category = requireEnum(requireBodyObject(req.body).category, assignable, 'category');
-    if (row.author_id !== req.user.id) {
+    if (row.author_id !== req.user.id && !isAdmin) {
       if (req.user.trust_score < config.trust.lowThreshold) throw forbidden('目前不能替問題分類');
       if (row.category !== 'uncategorized') throw new ApiError(409, 'INVALID_STATE', '這個問題已經分類過了');
     }
-    updateCategory.run(category, row.id);
+    db.transaction(() => {
+      updateCategory.run(category, row.id);
+      if (isAdmin) audit.record(req.user.id, 'question.category', 'question', row.id, { before: row.category, after: category });
+    })();
     getRealtime().questionChanged(row.id);
     getRealtime().feedChanged();
     res.json({ data: serializers.questionDetail(req, byId.get(row.id)) });
@@ -309,11 +318,33 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
   router.delete('/questions/:id', async (req, res) => {
     const row = byId.get(req.params.id);
     if (!row) throw notFound();
-    if (row.author_id !== req.user.id) throw forbidden('只有發問者可以撤回問題');
+    const isAdmin = req.user.role === 'admin';
+    if (row.author_id !== req.user.id && !isAdmin) throw forbidden('只有發問者可以撤回問題');
     const assist = activeAssist.get(row.id);
     const files = relatedMedia.all({ id: row.id });
-    db.transaction(() => deleteRelated.forEach((statement) => statement.run({ id: row.id })))();
+    // 精確座標不保留；媒體檔會真的刪除，稽核只記錄檔案種類。
+    const snapshot = isAdmin && {
+      title: row.title,
+      body: row.body,
+      category: row.category,
+      author_id: row.author_id,
+      tags: tagsOf.all(row.id).map((t) => t.tag_key),
+      answers: db.prepare('SELECT id, author_id, body FROM answers WHERE question_id = ?').all(row.id),
+      media: files.map((f) => ({ id: f.id, kind: f.kind })),
+    };
+    db.transaction(() => {
+      if (snapshot) audit.record(req.user.id, 'question.delete', 'question', row.id, snapshot);
+      deleteRelated.forEach((statement) => statement.run({ id: row.id }));
+    })();
     await removeMediaFiles(files);
+    if (row.author_id !== req.user.id) {
+      notifier.create({
+        userId: row.author_id,
+        type: 'content_moderated',
+        title: '你的問題已被管理員移除',
+        body: '管理員移除了你發布的問題',
+      });
+    }
 
     if (assist) {
       notifier.create({

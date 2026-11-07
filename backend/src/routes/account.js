@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { validationError } from '../errors.js';
+import { ApiError, validationError } from '../errors.js';
 import { snap } from '../geo.js';
 import { serializeNotification } from '../notifications.js';
 import { meUser } from '../serialize.js';
@@ -10,6 +10,7 @@ import {
 } from '../util.js';
 
 export function publicSessionRoutes({ db, config }) {
+  const setRole = db.prepare('UPDATE users SET role = ? WHERE id = ?');
   const router = Router();
   const findUser = db.prepare('SELECT * FROM users WHERE townpass_user_id = ?');
   const insertUser = db.prepare(`
@@ -27,6 +28,13 @@ export function publicSessionRoutes({ db, config }) {
     if (!user) {
       const id = newId('u');
       insertUser.run(id, townpassUserId, nickname ?? `市民${id.slice(-4)}`, JSON.stringify([language]), nowIso());
+      user = findUser.get(townpassUserId);
+    }
+    if (user.banned_at) throw new ApiError(403, 'ACCOUNT_BANNED', '這個帳號已被停權');
+    const listedRole = config.adminTownpassIds.includes(townpassUserId) ? 'admin'
+      : config.botTownpassIds.includes(townpassUserId) ? 'bot' : null;
+    if (listedRole && user.role !== listedRole) {
+      setRole.run(listedRole, user.id);
       user = findUser.get(townpassUserId);
     }
 

@@ -18,6 +18,7 @@ backend/
 │  ├─ push.js            FCM 發送、重試、清除無效 token
 │  ├─ classifier.js      線上分類
 │  ├─ tags.js            標籤驗證與模糊比對
+│  ├─ audit.js           管理員稽核紀錄
 │  ├─ rewards.js         徽章
 │  ├─ signatures.js      媒體短效連結
 │  ├─ geo.js             網格與距離
@@ -63,6 +64,12 @@ docs/
 4. 一起 commit 規格和程式，並通知前端。
 
 **不要直接改 `api-spec.md`**，它是由 `openapi.yaml` 和 `docs/api/generate/header.md` 產生的，改了會被覆蓋。
+
+## 身份與管理員
+
+`users.role` 是 `user`、`admin` 或 `bot`。Bot 除了回傳的身份，權限和一般使用者相同。
+
+管理員的路由在 `routes/admin.js`；刪除、分類、標籤、已解決和個資決定則沿用原本的 API，在路由內判斷 `req.user.role`。**新增管理員能做的操作時，都要呼叫 `audit.record`。**
 
 ## 通知管道
 

@@ -5,7 +5,7 @@ import {
   requireBodyObject, requireEnum,
 } from '../util.js';
 
-export function answerRoutes({ db, config, serializers, notifier, getRealtime, limiter, rewards, removeMediaFiles }) {
+export function answerRoutes({ db, config, serializers, notifier, getRealtime, limiter, rewards, removeMediaFiles, audit }) {
   const router = Router();
   const questionById = db.prepare('SELECT * FROM questions WHERE id = ?');
   const answerById = db.prepare('SELECT * FROM answers WHERE id = ?');
@@ -148,20 +148,42 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
     'DELETE FROM media WHERE answer_id = @id',
     'DELETE FROM answers WHERE id = @id',
   ].map((sql) => db.prepare(sql));
+  const clearAccepted = db.prepare('UPDATE questions SET accepted_answer_id = NULL WHERE id = ?');
   const dropCount = db.prepare('UPDATE questions SET answer_count = answer_count - 1 WHERE id = ?');
 
   // 可信度不回補，避免用刪除回答洗掉倒讚的影響。
   router.delete('/answers/:id', async (req, res) => {
     const answer = answerById.get(req.params.id);
     if (!answer) throw notFound();
-    if (answer.author_id !== req.user.id) throw forbidden('只能刪除自己的回答');
-    if (answer.is_accepted) throw new ApiError(409, 'ANSWER_ACCEPTED', '已採納的回答不能刪除');
+    const isAdmin = req.user.role === 'admin';
+    if (answer.author_id !== req.user.id && !isAdmin) throw forbidden('只能刪除自己的回答');
+    if (answer.is_accepted && !isAdmin) throw new ApiError(409, 'ANSWER_ACCEPTED', '已採納的回答不能刪除');
     const files = answerMediaRows.all(answer.id);
     db.transaction(() => {
+      if (isAdmin) {
+        audit.record(req.user.id, 'answer.delete', 'answer', answer.id, {
+          question_id: answer.question_id,
+          author_id: answer.author_id,
+          body: answer.body,
+          was_accepted: Boolean(answer.is_accepted),
+          media: files.map((f) => ({ id: f.id, kind: f.kind })),
+        });
+      }
+      // 已發出的積分不收回；問題維持已解決，只是不再指向這則回答。
+      if (answer.is_accepted) clearAccepted.run(answer.question_id);
       deleteAnswerStatements.forEach((statement) => statement.run({ id: answer.id }));
       dropCount.run(answer.question_id);
     })();
     await removeMediaFiles(files);
+    if (answer.author_id !== req.user.id) {
+      notifier.create({
+        userId: answer.author_id,
+        type: 'content_moderated',
+        title: '你的回答已被管理員移除',
+        body: '管理員移除了你發布的回答',
+        questionId: answer.question_id,
+      });
+    }
     signalAnswers(answer.question_id);
     getRealtime().questionChanged(answer.question_id);
     getRealtime().feedChanged();
