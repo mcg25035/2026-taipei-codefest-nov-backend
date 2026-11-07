@@ -2155,3 +2155,153 @@ describe('分類和標籤合併', () => {
     }
   });
 });
+
+describe('討論串排序', () => {
+  const H = 3600e3;
+  const withServer = async (run) => {
+    const s = await startTestServer({ adminTownpassIds: ['root'] });
+    try { await run(s); } finally { await s.stop(); }
+  };
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  const age = (s, id, ms) => s.server.db.prepare('UPDATE questions SET created_at = ? WHERE id = ?').run(ago(ms), id);
+  const newQ = async (s, user, createdAgo = 0) => {
+    const q = (await s.call('POST', '/questions', { token: user.token, body: s.question() })).body.data;
+    if (createdAgo) age(s, q.id, createdAgo);
+    return q;
+  };
+  const reply = async (s, user, id, repliedAgo = 0) => {
+    const a = (await s.call('POST', '/questions/{question_id}/answers', { token: user.token, params: { question_id: id }, body: { body: '回答' } })).body.data;
+    if (repliedAgo) s.server.db.prepare('UPDATE answers SET created_at = ? WHERE id = ?').run(ago(repliedAgo), a.id);
+    return a;
+  };
+  const up = (s, user, id) => s.call('PUT', '/answers/{answer_id}/vote', { token: user.token, params: { answer_id: id }, body: { value: 1 } });
+  const feed = async (s, user, query = {}) => (await s.call('GET', '/questions', { token: user.token, query })).body;
+  const logins = (s, n) => Promise.all(Array.from({ length: n }, () => s.login()));
+
+  test('依約定的七層順序排列', async () => withServer(async (s) => {
+    const [asker, r1, r2, r3, r4, viewer] = await logins(s, 6);
+    const resolved = await newQ(s, asker);
+    await s.call('POST', '/questions/{question_id}/resolve', { token: asker.token, params: { question_id: resolved.id } });
+
+    const quiet = await newQ(s, asker, 5 * H);
+    for (const r of [r1, r2, r3, r4]) await reply(s, r, quiet.id, 3 * H);
+    const active = await newQ(s, asker, 5 * H);
+    for (const r of [r1, r2, r3, r4]) await reply(s, r, active.id);
+    const supported = await newQ(s, asker, 5 * H);
+    await up(s, viewer, (await reply(s, r1, supported.id)).id);
+    const fresh = await newQ(s, asker);
+    const unverified = await newQ(s, asker, 5 * H);
+    await reply(s, r1, unverified.id);
+    const waiting = await newQ(s, asker, 3 * H);
+
+    const ids = (await feed(s, viewer)).data.map((q) => q.id);
+    assert.deepEqual(ids, [waiting.id, unverified.id, fresh.id, supported.id, active.id, quiet.id, resolved.id]);
+  }));
+
+  test('同層內：等越久越前面；久未回覆的少人貼文在前；多人討論最近的在前', async () => withServer(async (s) => {
+    const [asker, a, b, c, d, viewer] = await logins(s, 6);
+    const q3h = await newQ(s, asker, 3 * H);
+    const q5h = await newQ(s, asker, 5 * H);
+    assert.deepEqual((await feed(s, viewer)).data.map((q) => q.id), [q5h.id, q3h.id]);
+    s.server.db.exec('DELETE FROM question_tags; DELETE FROM questions');
+
+    const recent = await newQ(s, asker);
+    await reply(s, a, recent.id, 10 * 60e3);
+    const stale = await newQ(s, asker);
+    await reply(s, a, stale.id, H);
+    assert.deepEqual((await feed(s, viewer)).data.map((q) => q.id), [stale.id, recent.id]);
+
+    const older = await newQ(s, asker);
+    for (const r of [a, b, c, d]) await reply(s, r, older.id, H);
+    const newer = await newQ(s, asker);
+    for (const r of [a, b, c, d]) await reply(s, r, newer.id);
+    const order = (await feed(s, viewer)).data.map((q) => q.id);
+    assert.ok(order.indexOf(newer.id) < order.indexOf(older.id));
+  }));
+
+  test('回覆者不算發問者和機器人；只有機器人回覆算待確認；自己按讚不算認同', async () => withServer(async (s) => {
+    const [asker, helper, viewer] = await logins(s, 3);
+    const selfOnly = await newQ(s, asker, 3 * H);
+    await reply(s, asker, selfOnly.id);
+    const db = s.server.db;
+    db.prepare("INSERT INTO users (id, townpass_user_id, nickname, languages, role, created_at) VALUES ('u_b', 'b', 'b', '[]', 'bot', ?)").run(ago(0));
+    const botOnly = await newQ(s, asker);
+    db.prepare("INSERT INTO answers (id, question_id, author_id, body, created_at) VALUES ('a_b', ?, 'u_b', 'x', ?)").run(botOnly.id, ago(0));
+    const selfVoted = await newQ(s, asker);
+    const answer = await reply(s, helper, selfVoted.id);
+    await up(s, helper, answer.id);
+    const freshEmpty = await newQ(s, asker);
+    const ids = (await feed(s, viewer)).data.map((q) => q.id);
+    assert.equal(ids[0], selfOnly.id, '只有自己回覆仍算無人回覆');
+    assert.ok(ids.indexOf(botOnly.id) < ids.indexOf(freshEmpty.id), '只有機器人回覆要優先確認');
+    assert.ok(ids.indexOf(selfVoted.id) < ids.indexOf(freshEmpty.id), '自己按讚不算有人認同');
+  }));
+
+  test('太舊或低可信度作者的貼文不加權，避免一直佔住最前面', async () => withServer(async (s) => {
+    const [asker, low, viewer] = await logins(s, 3);
+    const ancient = await newQ(s, asker, 8 * 24 * H);
+    const spam = await newQ(s, low, 3 * H);
+    s.server.db.prepare('UPDATE users SET trust_score = -11 WHERE id = ?').run(low.user.id);
+    const fresh = await newQ(s, asker);
+    const resolved = await newQ(s, asker);
+    await s.call('POST', '/questions/{question_id}/resolve', { token: asker.token, params: { question_id: resolved.id } });
+    const ids = (await feed(s, viewer)).data.map((q) => q.id);
+    assert.equal(ids[0], fresh.id);
+    assert.equal(ids.at(-1), resolved.id);
+    for (const id of [ancient.id, spam.id]) assert.ok(ids.indexOf(id) < ids.indexOf(resolved.id));
+  }));
+
+  test('下滑翻頁沿用第一頁順序，途中有變動也不重複不遺漏；上滑重新排序', async () => withServer(async (s) => {
+    const [asker, helper, viewer] = await logins(s, 3);
+    const created = [];
+    for (let i = 0; i < 6; i++) created.push(await newQ(s, asker, (i + 3) * H));
+    const first = await feed(s, viewer, { limit: '2' });
+    const top = first.data[0].id;
+    await reply(s, helper, top);
+    const extra = await newQ(s, asker, 100 * H);
+
+    const seen = first.data.map((q) => q.id);
+    let cursor = first.next_cursor;
+    while (cursor) {
+      const page = await feed(s, viewer, { limit: '2', cursor });
+      seen.push(...page.data.map((q) => q.id));
+      cursor = page.next_cursor;
+    }
+    assert.equal(new Set(seen).size, seen.length, '沒有重複');
+    assert.deepEqual([...seen].sort(), created.map((q) => q.id).sort(), '翻頁時不插入新貼文，也不漏掉');
+
+    const refreshed = (await feed(s, viewer, { limit: '10' })).data.map((q) => q.id);
+    assert.equal(refreshed[0], extra.id, '上滑看到最新排序');
+    assert.notEqual(refreshed[0], top);
+  }));
+
+  test('翻頁時已刪除的貼文會略過；快照失效時仍可繼續', async () => withServer(async (s) => {
+    const [asker, viewer] = await logins(s, 2);
+    const created = [];
+    for (let i = 0; i < 4; i++) created.push(await newQ(s, asker, (i + 3) * H));
+    const first = await feed(s, viewer, { limit: '2' });
+    await s.call('DELETE', '/questions/{question_id}', { token: asker.token, params: { question_id: first.data.length ? created[0].id : '' } });
+    const second = await feed(s, viewer, { limit: '2', cursor: first.next_cursor });
+    assert.ok(second.data.every((q) => q.id !== created[0].id));
+    const forged = Buffer.from(JSON.stringify({ s: 's_missing', o: 1 })).toString('base64url');
+    const recovered = await s.call('GET', '/questions', { token: viewer.token, query: { limit: '2', cursor: forged } });
+    assert.equal(recovered.status, 200, recovered.raw);
+    assert.equal(recovered.body.data.length, 2);
+  }));
+
+  test('author=me 和明確指定 sort 都依原本方式；篩選條件仍生效', async () => withServer(async (s) => {
+    const [asker, helper, viewer] = await logins(s, 3);
+    const older = await newQ(s, asker, 5 * H);
+    const newer = await newQ(s, asker);
+    assert.deepEqual((await feed(s, asker, { author: 'me' })).data.map((q) => q.id), [newer.id, older.id]);
+    assert.deepEqual((await feed(s, viewer, { sort: 'latest' })).data.map((q) => q.id), [newer.id, older.id]);
+    assert.deepEqual((await feed(s, viewer, { sort: 'attention' })).data.map((q) => q.id), [older.id, newer.id]);
+    const other = await newQ(s, helper);
+    s.server.db.prepare("UPDATE questions SET category = 'scam_check' WHERE id = ?").run(other.id);
+    assert.deepEqual((await feed(s, viewer, { category: 'scam_check' })).data.map((q) => q.id), [other.id]);
+    assert.equal((await s.call('GET', '/questions', { token: viewer.token, query: { sort: 'nope' } })).status, 400);
+    const near = (await s.call('POST', '/questions', { token: asker.token, body: s.question({ location_sharing: 'approximate', location: TAIPEI }) })).body.data;
+    const nearby = await feed(s, viewer, { scope: 'nearby', lat: String(TAIPEI.lat), lng: String(TAIPEI.lng) });
+    assert.deepEqual(nearby.data.map((q) => q.id), [near.id]);
+  }));
+});

@@ -36,6 +36,7 @@ curl -X POST $BASE/questions \
 - **驗證：** 除標示不需要 token 的 API 外，都要帶 `Authorization: Bearer <token>`。token 效期 30 天。
 - **格式：** 除上傳檔案外，請求和回應都是 JSON，時間是 ISO 8601 UTC。
 - **成功回應：** `{ "data": ... }`。
+- **討論串排序：** `GET /questions` 預設把最需要人看的貼文排前面。上滑重新整理不帶 `cursor`；下滑帶 `next_cursor`，順序不變。合併頁面時要用 `id` 去重。收到 `feed.changed` 不要自動重排，建議只提示有新內容。
 - **分頁：** 列表回傳 `next_cursor`，把它放進下一次的 `cursor`；值為 `null` 表示沒有下一頁。參數 `limit` 可填 1 到 50，預設 20。
 - **防重送：** 網路不穩時，用相同的 `client_request_id` 重送，不會重複建立內容。
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
@@ -344,6 +345,9 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 `scope=nearby` 或 `sort=nearest` 時必須帶 `lat`、`lng`。
 任務板不是另一個資源，而是此列表依 `reward_points` 與 `can_claim` 呈現的畫面。
+`sort=attention` 由上到下是：無人回覆超過 2 小時、少數人回覆或只有機器人且沒人按讚、無人回覆 2 小時內、少數人回覆且有人按讚、超過 3 人且 2 小時內有討論、超過 3 人但近期無討論、已解決。
+回覆者不算發問者和機器人。超過 7 天或作者可信度低的未解決貼文，排在已解決之前。
+上滑重新整理時不帶 `cursor`，會重新排序；下滑時帶 `next_cursor`，沿用第一頁的順序。伺服器重啟或超過 30 分鐘後會重新排序，所以前端要用 `id` 去重。
 `tag`、`tag_q` 可和其他條件同時使用，例如 `tag_q=詐騙&status=open`。
 `sort=unanswered` 只回傳還沒有回答的問題，由新到舊排序。
 
@@ -363,7 +367,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `assistance_mode` | query | [AssistanceMode](#assistancemode) |  |  |
 | `service_id` | query | string |  | 只看某個城市通功能的問題 |
 | `author` | query | `me` |  | 填 me 可看自己發的問題 |
-| `sort` | query | `latest` \| `nearest` \| `unanswered` |  | 預設 `latest` |
+| `sort` | query | `attention` \| `latest` \| `nearest` \| `unanswered` |  | 預設 `attention`；帶 `author=me` 時預設 `latest`；帶 `tag_q` 且未指定時依相似度排序 |
 | `cursor` | query | string |  |  |
 | `limit` | query | integer |  | 最小 1，最大 50，預設 `20` |
 

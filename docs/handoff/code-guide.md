@@ -17,6 +17,7 @@ backend/
 │  ├─ notifications.js   建立通知、附近配對
 │  ├─ realtime.js        Socket.IO 訊號與 SSE
 │  ├─ push.js            FCM 發送、重試、清除無效 token
+│  ├─ attention.js       討論串預設排序與翻頁快照
 │  ├─ classifier.js      線上分類
 │  ├─ semanticCache.js   問題向量比對與機器人自動回覆
 │  ├─ tags.js            標籤驗證與模糊比對

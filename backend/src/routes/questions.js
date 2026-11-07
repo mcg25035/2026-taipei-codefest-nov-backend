@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { ApiError, forbidden, notFound, validationError } from '../errors.js';
+import { createSnapshotStore, rankByAttention } from '../attention.js';
 import { distanceM, snap } from '../geo.js';
 import { matchTagKeys, parseTags, systemTagOf, tagKey } from '../tags.js';
 import {
@@ -137,7 +138,9 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
 
   function parseListQuery(query, user) {
     const scope = query.scope === undefined ? 'global' : requireEnum(query.scope, ['global', 'nearby'], 'scope');
-    const sort = query.sort === undefined ? 'latest' : requireEnum(query.sort, ['latest', 'nearest', 'unanswered'], 'sort');
+    // 看自己發的問題依時間排序；其他情況預設把最需要人看的貼文排前面。
+    const defaultSort = query.author === undefined ? 'attention' : 'latest';
+    const sort = query.sort === undefined ? defaultSort : requireEnum(query.sort, ['attention', 'latest', 'nearest', 'unanswered'], 'sort');
     const lat = queryNumber(query, 'lat', { min: -90, max: 90 });
     const lng = queryNumber(query, 'lng', { min: -180, max: 180 });
     const hasPoint = lat !== undefined && lng !== undefined;
@@ -148,7 +151,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     const params = {};
     const equals = (column, value) => {
       if (value === undefined) return;
-      where.push(`${column} = @${column}`);
+      where.push(`q.${column} = @${column}`);
       params[column] = value;
     };
     equals('status', query.status === undefined ? undefined : requireEnum(query.status, QUESTION_STATUSES, 'status'));
@@ -160,9 +163,9 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       requireEnum(query.author, ['me'], 'author');
       equals('author_id', user.id);
     }
-    if (sort === 'unanswered') where.push('answer_count = 0');
+    if (sort === 'unanswered') where.push('q.answer_count = 0');
     if (query.tag !== undefined) {
-      where.push('id IN (SELECT question_id FROM question_tags WHERE tag_key = @exactTag)');
+      where.push('q.id IN (SELECT question_id FROM question_tags WHERE tag_key = @exactTag)');
       params.exactTag = tagKey(query.tag);
     }
     let tagScores = null;
@@ -174,7 +177,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       const keys = [...tagScores.keys()];
       keys.forEach((key, i) => { params[`fuzzy${i}`] = key; });
       where.push(keys.length
-        ? `id IN (SELECT question_id FROM question_tags WHERE tag_key IN (${keys.map((_, i) => `@fuzzy${i}`).join(', ')}))`
+        ? `q.id IN (SELECT question_id FROM question_tags WHERE tag_key IN (${keys.map((_, i) => `@fuzzy${i}`).join(', ')}))`
         : '0');
     }
     return {
@@ -192,7 +195,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
   // 距離用網格點計算，附近或依距離排序時在記憶體裡過濾，並以 offset 分頁。
   function listByDistance(q) {
     const center = snap(q.point);
-    let rows = db.prepare(`SELECT * FROM questions ${whereSql([...q.where, 'approx_lat IS NOT NULL'])} ORDER BY created_at DESC, id DESC`).all(q.params)
+    let rows = db.prepare(`SELECT * FROM questions q ${whereSql([...q.where, 'q.approx_lat IS NOT NULL'])} ORDER BY created_at DESC, id DESC`).all(q.params)
       .map((row) => ({ row, distance: distanceM(center, { lat: row.approx_lat, lng: row.approx_lng }) }));
     if (q.scope === 'nearby') rows = rows.filter(({ distance }) => distance <= q.radius);
     if (q.sort === 'nearest') rows.sort((a, b) => a.distance - b.distance);
@@ -205,12 +208,53 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
   // 模糊搜尋預設依相似度排序，相同時新的在前。
   function listByRelevance(q) {
     const best = (row) => Math.max(0, ...tagKeysOf.all(row.id).map((t) => q.tagScores.get(t.tag_key) ?? 0));
-    const rows = db.prepare(`SELECT * FROM questions ${whereSql(q.where)} ORDER BY created_at DESC, id DESC`).all(q.params)
+    const rows = db.prepare(`SELECT * FROM questions q ${whereSql(q.where)} ORDER BY created_at DESC, id DESC`).all(q.params)
       .map((row) => ({ row, score: best(row) }))
       .sort((a, b) => b.score - a.score);
     const offset = Number.isInteger(q.cursor?.o) && q.cursor.o >= 0 ? q.cursor.o : 0;
     const page = rows.slice(offset, offset + q.limit).map(({ row }) => row);
     return { page, next: offset + q.limit < rows.length ? encodeCursor({ o: offset + q.limit }) : null };
+  }
+
+  const snapshots = createSnapshotStore({
+    ttlMs: config.attention.snapshotTtlMs,
+    maxEntries: config.attention.snapshotMaxEntries,
+    newId,
+  });
+  const byIdForPage = (ids) => ids.map((id) => byId.get(id)).filter(Boolean);
+
+  function rankedIds(q) {
+    const center = q.point && snap(q.point);
+    let rows = db.prepare(`
+      SELECT q.id, q.status, q.created_at, q.approx_lat, q.approx_lng, u.trust_score AS author_trust,
+        (SELECT COUNT(DISTINCT a.author_id) FROM answers a JOIN users au ON au.id = a.author_id
+          WHERE a.question_id = q.id AND a.author_id != q.author_id AND au.role != 'bot') AS people,
+        (SELECT COUNT(*) FROM answers a JOIN users au ON au.id = a.author_id
+          WHERE a.question_id = q.id AND au.role = 'bot') AS bots,
+        EXISTS (SELECT 1 FROM votes v JOIN answers a ON a.id = v.answer_id
+          WHERE a.question_id = q.id AND a.author_id != q.author_id AND v.value = 1 AND v.user_id != a.author_id) AS has_support,
+        COALESCE((SELECT MAX(a.created_at) FROM answers a WHERE a.question_id = q.id AND a.author_id != q.author_id), q.created_at) AS last_activity
+      FROM questions q JOIN users u ON u.id = q.author_id
+      ${whereSql(q.where)}
+    `).all(q.params);
+    if (q.scope === 'nearby') {
+      rows = rows.filter((r) => r.approx_lat !== null && distanceM(center, { lat: r.approx_lat, lng: r.approx_lng }) <= q.radius);
+    }
+    return rankByAttention(rows, Date.now(), { ...config.attention, lowTrust: config.trust.lowThreshold }).map((r) => r.id);
+  }
+
+  function listByAttention(q) {
+    const offset = Number.isInteger(q.cursor?.o) && q.cursor.o >= 0 ? q.cursor.o : 0;
+    let snapshotId = typeof q.cursor?.s === 'string' ? q.cursor.s : null;
+    let ids = snapshotId && snapshots.get(snapshotId);
+    // 快照過期或伺服器重啟時重新排序，繼續往下讀；前端要用 id 去重。
+    if (!ids) {
+      ids = rankedIds(q);
+      snapshotId = snapshots.save(ids);
+    }
+    const page = byIdForPage(ids.slice(offset, offset + q.limit));
+    const nextOffset = offset + q.limit;
+    return { page, next: nextOffset < ids.length ? encodeCursor({ s: snapshotId, o: nextOffset }) : null };
   }
 
   function listByTime(q) {
@@ -221,7 +265,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       params.cursorAt = String(q.cursor.c);
       params.cursorId = String(q.cursor.i);
     }
-    const rows = db.prepare(`SELECT * FROM questions ${whereSql(clauses)} ORDER BY created_at DESC, id DESC LIMIT @limit`).all(params);
+    const rows = db.prepare(`SELECT * FROM questions q ${whereSql(clauses)} ORDER BY created_at DESC, id DESC LIMIT @limit`).all(params);
     const page = rows.slice(0, q.limit);
     const last = page.at(-1);
     return { page, next: rows.length > q.limit ? encodeCursor({ c: last.created_at, i: last.id }) : null };
@@ -229,7 +273,9 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
 
   router.get('/questions', (req, res) => {
     const q = parseListQuery(req.query, req.user);
-    const list = q.byRelevance ? listByRelevance : q.scope === 'nearby' || q.sort === 'nearest' ? listByDistance : listByTime;
+    const list = q.byRelevance ? listByRelevance
+      : q.sort === 'attention' ? listByAttention
+        : q.scope === 'nearby' || q.sort === 'nearest' ? listByDistance : listByTime;
     const { page, next } = list(q);
     res.json({ data: page.map((row) => serializers.questionSummary(req, row, q.point)), next_cursor: next });
   });

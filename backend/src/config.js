@@ -26,6 +26,12 @@ export function loadConfig(overrides = {}) {
     // 目前相信前端傳來的 ID；這些名單內的 ID 登入時會取得對應身份。
     adminTownpassIds: idList(env.ADMIN_TOWNPASS_IDS),
     botTownpassIds: idList(env.BOT_TOWNPASS_IDS),
+    attention: {
+      recentMs: 2 * 60 * 60_000,
+      maxAgeMs: 7 * 24 * 60 * 60_000,
+      snapshotTtlMs: 30 * 60_000,
+      snapshotMaxEntries: 200,
+    },
     // 文字向量服務；未設定時不啟用語意快取。
     embeddingUrl: env.EMBEDDING_URL?.replace(/\/$/, '') || null,
     semanticCacheThreshold: Number(env.SEMANTIC_CACHE_THRESHOLD ?? 0.88),

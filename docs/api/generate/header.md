@@ -36,6 +36,7 @@ curl -X POST $BASE/questions \
 - **驗證：** 除標示不需要 token 的 API 外，都要帶 `Authorization: Bearer <token>`。token 效期 30 天。
 - **格式：** 除上傳檔案外，請求和回應都是 JSON，時間是 ISO 8601 UTC。
 - **成功回應：** `{ "data": ... }`。
+- **討論串排序：** `GET /questions` 預設把最需要人看的貼文排前面。上滑重新整理不帶 `cursor`；下滑帶 `next_cursor`，順序不變。合併頁面時要用 `id` 去重。收到 `feed.changed` 不要自動重排，建議只提示有新內容。
 - **分頁：** 列表回傳 `next_cursor`，把它放進下一次的 `cursor`；值為 `null` 表示沒有下一頁。參數 `limit` 可填 1 到 50，預設 20。
 - **防重送：** 網路不穩時，用相同的 `client_request_id` 重送，不會重複建立內容。
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
