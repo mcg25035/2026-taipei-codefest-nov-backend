@@ -1,0 +1,6 @@
+node_modules/
+.env
+# 含 frp auth token，不可進版控
+frpc.toml
+# 官方 repo 的 clone，上游：https://github.com/taipei-doit/TownPass
+TownPass/

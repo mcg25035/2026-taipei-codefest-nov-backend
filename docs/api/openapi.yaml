@@ -1,0 +1,1254 @@
+openapi: 3.1.0
+info:
+  title: 看得懂 Help API
+  version: 0.1.0
+  description: |
+    城市通「看不懂」互助論壇的後端 API。產品決策、狀態流程與即時更新規則請見同目錄的 README.md。
+
+    - 成功回應：`{ "data": ... }`；列表另有 `next_cursor`
+    - 失敗回應：`{ "error": { "code", "message", "details" } }`
+    - 時間：ISO 8601 UTC
+    - 除標示 `security: []` 者外，都要帶 `Authorization: Bearer <token>`
+servers:
+  - url: https://{host}/api/v1
+    variables:
+      host:
+        default: api.example.com
+        description: 自架伺服器的網域（待定）
+tags:
+  - name: Session
+  - name: Me
+  - name: Media
+  - name: Question
+  - name: Answer
+  - name: Assist
+    description: 現場協助
+  - name: PII
+    description: 個資標記與遮蔽
+  - name: Reward
+  - name: Notification
+  - name: Realtime
+  - name: Meta
+security:
+  - bearerAuth: []
+
+paths:
+  /sessions:
+    post:
+      tags: [Session]
+      summary: 用城市通使用者 ID 建立工作階段
+      description: |
+        前端先向 App 取得 `userinfo`，再只傳下列欄位。不要傳 `realName`、`idNo`、`phoneNo` 等個資。
+        這不是真正的身分驗證：`userinfo` 沒有 token 或簽章，後端無法確認真偽。
+      security: []
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [townpass_user_id]
+              properties:
+                townpass_user_id: { type: string, maxLength: 128 }
+                nickname: { type: string, maxLength: 30, description: 僅首次建立帳號時採用 }
+                language: { $ref: '#/components/schemas/LanguageTag' }
+      responses:
+        '201':
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [token, expires_at, user]
+                    properties:
+                      token: { type: string }
+                      expires_at: { type: string, format: date-time }
+                      user: { $ref: '#/components/schemas/Me' }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /me:
+    get:
+      tags: [Me]
+      summary: 取得自己的資料與設定
+      operationId: getMe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Me]
+      summary: 更新暱稱、語言與附近通知設定
+      operationId: updateMe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                nickname: { type: string, minLength: 1, maxLength: 30 }
+                languages:
+                  type: array
+                  items: { $ref: '#/components/schemas/LanguageTag' }
+                  description: 看得懂的語言，用於篩選問題
+                nearby_notifications_enabled: { type: boolean }
+                nearby_radius_m: { type: integer, minimum: 100, maximum: 5000 }
+                location_sharing:
+                  allOf:
+                    - $ref: '#/components/schemas/LocationSharing'
+                  description: 預設的位置分享等級；改成 off 時，後端立即刪除已保存的位置
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Me' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /me/heartbeat:
+    post:
+      tags: [Me]
+      summary: 回報位置並取回未送達的通知
+      description: |
+        背景輪詢的主要入口，Flutter 定時呼叫，再把回傳內容顯示成本機通知。
+        後端只保留每位使用者最新一筆位置，且不對外公開。
+        `location_sharing` 為 `off` 時，App 不應傳 `location`，後端也會忽略；為 `approximate` 時，後端只保存網格點。
+        已透過回應傳遞的通知，下次不會再次回傳。
+      operationId: heartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_state]
+              properties:
+                location: { $ref: '#/components/schemas/Coordinates' }
+                app_state: { type: string, enum: [foreground, background] }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [notifications, next_heartbeat_seconds]
+                    properties:
+                      notifications:
+                        type: array
+                        items: { $ref: '#/components/schemas/Notification' }
+                      next_heartbeat_seconds: { type: integer, example: 60 }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /media:
+    post:
+      tags: [Media]
+      summary: 上傳圖片或語音
+      description: |
+        圖片必須已在手機端完成個資遮蔽。後端會重新編碼圖片並移除 EXIF（含 GPS）。
+        超過 24 小時未被問題或回答引用的檔案會被刪除。
+      operationId: uploadMedia
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, kind]
+              properties:
+                file: { type: string, format: binary, description: '圖片：JPEG、PNG、WebP，最大 10 MB；語音：M4A、AAC、MP3、WebM，最長 3 分鐘' }
+                kind: { type: string, enum: [image, audio] }
+                duration_seconds: { type: number, description: kind 為 audio 時必填 }
+      responses:
+        '201':
+          description: 已上傳
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Media' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+
+  /questions:
+    get:
+      tags: [Question]
+      summary: 問題列表（論壇與任務板共用）
+      description: |
+        `scope=nearby` 或 `sort=nearest` 時必須帶 `lat`、`lng`。
+        任務板不是另一個資源，而是此列表依 `reward_points` 與 `can_claim` 呈現的畫面。
+        `sort=unanswered` 只回傳還沒有回答的問題，由新到舊排序。
+      operationId: listQuestions
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [global, nearby], default: global } }
+        - { name: lat, in: query, schema: { type: number, minimum: -90, maximum: 90 } }
+        - { name: lng, in: query, schema: { type: number, minimum: -180, maximum: 180 } }
+        - { name: radius_m, in: query, schema: { type: integer, minimum: 100, maximum: 5000, default: 1000 } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/QuestionStatus' } }
+        - { name: category, in: query, schema: { $ref: '#/components/schemas/Category' } }
+        - { name: language, in: query, schema: { $ref: '#/components/schemas/LanguageTag' } }
+        - { name: assistance_mode, in: query, schema: { $ref: '#/components/schemas/AssistanceMode' } }
+        - { name: service_id, in: query, description: 只看某個城市通功能的問題, schema: { type: string } }
+        - { name: author, in: query, description: 填 me 可看自己發的問題, schema: { type: string, enum: [me] } }
+        - { name: sort, in: query, schema: { type: string, enum: [latest, nearest, unanswered], default: latest } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/QuestionSummary' }
+                  next_cursor: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Question]
+      summary: 發問
+      description: |
+        `body` 和 `media_ids` 至少要有一個。
+        未填 `location_sharing` 時，採用使用者的預設等級。
+        等級為 `off` 時不可帶 `location`，問題不會出現在附近列表，也不會通知附近的人；其他等級必須帶 `location`。
+        `assistance_mode` 為 `onsite` 或 `either` 時，等級不可為 `off`，且 `location` 要傳精確座標。
+        等級為 `approximate` 的現場問題，精確座標只在有人接案後提供給接案者。
+        相同使用者重送相同的 `client_request_id` 時，回傳原本的問題，不會重複建立。
+      operationId: createQuestion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateQuestionRequest' }
+      responses:
+        '201':
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/QuestionDetail' }
+        '200':
+          description: 重送，回傳原本的問題
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/QuestionDetail' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /questions/{question_id}:
+    parameters:
+      - { $ref: '#/components/parameters/QuestionId' }
+    get:
+      tags: [Question]
+      summary: 問題詳情
+      operationId: getQuestion
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/QuestionDetail' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Question]
+      summary: 撤回問題
+      description: 僅限發問者。問題與其媒體檔立即不可存取，進行中的現場協助會一併取消。
+      operationId: withdrawQuestion
+      responses:
+        '204': { description: 已撤回 }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /questions/{question_id}/answers:
+    parameters:
+      - { $ref: '#/components/parameters/QuestionId' }
+    get:
+      tags: [Answer]
+      summary: 回答列表
+      description: '`sort=top` 時，已採納的回答置頂，其餘依淨讚數排序。'
+      operationId: listAnswers
+      parameters:
+        - { name: sort, in: query, schema: { type: string, enum: [top, oldest], default: top } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Answer' }
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Answer]
+      summary: 回答問題
+      description: '`body` 和 `media_ids` 至少要有一個。發問者也可以回覆自己的問題以補充說明，但不能採納自己的回答。'
+      operationId: createAnswer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body: { type: string, maxLength: 5000 }
+                media_ids:
+                  type: array
+                  maxItems: 5
+                  items: { type: string }
+                language: { $ref: '#/components/schemas/LanguageTag' }
+                client_request_id: { type: string, maxLength: 64 }
+      responses:
+        '201':
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Answer' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /answers/{answer_id}:
+    parameters:
+      - { $ref: '#/components/parameters/AnswerId' }
+    delete:
+      tags: [Answer]
+      summary: 刪除自己的回答
+      description: 已被採納的回答不能刪除，回傳 409 `ANSWER_ACCEPTED`。
+      operationId: deleteAnswer
+      responses:
+        '204': { description: 已刪除 }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /answers/{answer_id}/accept:
+    parameters:
+      - { $ref: '#/components/parameters/AnswerId' }
+    post:
+      tags: [Answer]
+      summary: 採納回答
+      description: |
+        僅限發問者，每題只能採納一次且不可撤銷。問題轉為 `resolved`，回答者獲得積分。
+        有進行中的現場協助時回傳 409 `ASSIST_ACTIVE`。
+      operationId: acceptAnswer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Answer' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /answers/{answer_id}/vote:
+    parameters:
+      - { $ref: '#/components/parameters/AnswerId' }
+    put:
+      tags: [Answer]
+      summary: 投正讚或倒讚
+      description: 每人每則回答一票，重複呼叫會覆蓋原本的票。不能投自己的回答。讚會影響回答排序與回答者的可信度評分，不影響積分。倒讚數和可信度評分不會出現在任何 API 回應中。
+      operationId: voteAnswer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: integer, enum: [1, -1] }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/VoteSummary' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Answer]
+      summary: 收回投票
+      operationId: unvoteAnswer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/VoteSummary' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /questions/{question_id}/assist:
+    parameters:
+      - { $ref: '#/components/parameters/QuestionId' }
+    get:
+      tags: [Assist]
+      summary: 取得自己參與的最新現場協助
+      description: |
+        回傳使用者參與的最新一筆，包含已完成或已取消的，前端才能在訊號後更新畫面。
+        精確位置只在進行中時有值。其他人在有進行中的任務時回傳 403，否則回傳 404。
+      operationId: getActiveAssist
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Assist' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Assist]
+      summary: 接下現場任務
+      description: |
+        接案者需在問題 3 公里內，否則回傳 403 `TOO_FAR`。
+        已有人接案時回傳 409 `ASSIST_ALREADY_CLAIMED`。發問者不能接自己的任務。
+        接案者的等級為 `off` 時回傳 403 `LOCATION_SHARING_OFF`。此處的 `location` 只用來檢查距離，不會保存。
+        可信度評分低於門檻時回傳 403 `ASSIST_NOT_ALLOWED`，回應不透露評分。
+      operationId: claimAssist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [location]
+              properties:
+                location: { $ref: '#/components/schemas/Coordinates' }
+      responses:
+        '201':
+          description: 已接案
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Assist' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /assists/{assist_id}/arrive:
+    parameters:
+      - { $ref: '#/components/parameters/AssistId' }
+    post:
+      tags: [Assist]
+      summary: 接案者回報已抵達
+      operationId: arriveAssist
+      responses:
+        '200': { $ref: '#/components/responses/AssistResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /assists/{assist_id}/complete:
+    parameters:
+      - { $ref: '#/components/parameters/AssistId' }
+    post:
+      tags: [Assist]
+      summary: 發問者確認完成
+      description: 僅限發問者，接案者未回報抵達時也能確認。問題轉為 `resolved`，接案者獲得積分，精確位置立即清除。
+      operationId: completeAssist
+      responses:
+        '200': { $ref: '#/components/responses/AssistResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /assists/{assist_id}/cancel:
+    parameters:
+      - { $ref: '#/components/parameters/AssistId' }
+    post:
+      tags: [Assist]
+      summary: 取消現場協助
+      description: 發問者或接案者皆可取消。問題回到 `open`，接案者立即失去精確位置的存取權。
+      operationId: cancelAssist
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 200 }
+      responses:
+        '200': { $ref: '#/components/responses/AssistResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /pii-reports:
+    post:
+      tags: [PII]
+      summary: 標記疑似個資
+      description: |
+        任何登入者都能標記。內容會立即對其他人隱藏，等發問者決定。
+        發問者自己標記時會直接生效。
+
+        - 圖片：填 `media_id` 與 `regions`
+        - 語音：填 `media_id`；accept 後整段移除
+        - 文字：填 `text_ranges`；標記問題標題時，`text_field` 填 `title`
+      operationId: createPiiReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePiiReportRequest' }
+      responses:
+        '201':
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [id, status]
+                    properties:
+                      id: { type: string }
+                      status: { $ref: '#/components/schemas/PiiReportStatus' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /me/pii-reports:
+    get:
+      tags: [PII]
+      summary: 列出等待我決定的個資標記
+      description: 只有發問者看得到。不會透露是誰標記的。`preview_url` 是短效連結，讓發問者查看被隱藏的原內容。
+      operationId: listMyPiiReports
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/PiiReportStatus' } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/PiiReport' }
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /pii-reports/{report_id}/accept:
+    parameters:
+      - { $ref: '#/components/parameters/ReportId' }
+    post:
+      tags: [PII]
+      summary: 同意遮蔽
+      description: |
+        僅限發問者。圖片會在伺服器上覆蓋不透明色塊並產生新檔與新 ID，原檔刪除；文字逐字換成 `█`，字數不變；語音整段移除。此操作不可逆。
+      operationId: acceptPiiReport
+      responses:
+        '200': { $ref: '#/components/responses/PiiReportResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /pii-reports/{report_id}/deny:
+    parameters:
+      - { $ref: '#/components/parameters/ReportId' }
+    post:
+      tags: [PII]
+      summary: 拒絕遮蔽並恢復顯示
+      description: 僅限發問者。若同一內容還有其他待決定的標記，內容會繼續隱藏。
+      operationId: denyPiiReport
+      responses:
+        '200': { $ref: '#/components/responses/PiiReportResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /users/{user_id}:
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Reward]
+      summary: 公開個人頁
+      security: []
+      operationId: getUserProfile
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/UserProfile' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /badges:
+    get:
+      tags: [Reward]
+      summary: 徽章清單與自己的解鎖狀態
+      operationId: listBadges
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Badge' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /me/point-transactions:
+    get:
+      tags: [Reward]
+      summary: 積分紀錄
+      description: 營運方日後若要做實質兌換，可沿用這份帳本。
+      operationId: listPointTransactions
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/PointTransaction' }
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /notifications:
+    get:
+      tags: [Notification]
+      summary: 通知列表
+      operationId: listNotifications
+      parameters:
+        - { name: unread_only, in: query, schema: { type: boolean, default: false } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor, unread_count]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Notification' }
+                  next_cursor: { type: [string, 'null'] }
+                  unread_count: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /notifications/read:
+    post:
+      tags: [Notification]
+      summary: 標記已讀
+      description: '`ids` 和 `all` 擇一。'
+      operationId: markNotificationsRead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                all: { type: boolean }
+      responses:
+        '204': { description: 已標記 }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /notifications/stream:
+    get:
+      tags: [Realtime]
+      summary: SSE 個人通知串流
+      description: |
+        只傳 `notification.created` 事件，內容是 `Notification`。其他資料更新走 Socket.IO 訊號加 REST，見 README。
+        原生 `EventSource` 不能帶 Authorization 標頭，WebView 請用 `@microsoft/fetch-event-source`。
+        斷線重連後不保證補發，請呼叫 `GET /notifications` 補抓。
+      operationId: notificationStream
+      responses:
+        '200':
+          description: 事件串流；每 25 秒送一次 ping 註解
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /meta:
+    get:
+      tags: [Meta]
+      summary: 前端需要的列舉與限制
+      security: []
+      operationId: getMeta
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [categories, languages, points, limits]
+                    properties:
+                      categories:
+                        type: array
+                        items:
+                          type: object
+                          required: [id, label]
+                          properties:
+                            id: { $ref: '#/components/schemas/Category' }
+                            label: { type: string }
+                      languages:
+                        type: array
+                        items: { $ref: '#/components/schemas/LanguageTag' }
+                      points:
+                        type: object
+                        required: [answer_accepted, assist_completed]
+                        properties:
+                          answer_accepted: { type: integer, example: 10 }
+                          assist_completed: { type: integer, example: 30 }
+                      limits:
+                        type: object
+                        additionalProperties: { type: integer }
+
+  /healthz:
+    get:
+      tags: [Meta]
+      summary: 健康檢查
+      security: []
+      operationId: healthz
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    QuestionId: { name: question_id, in: path, required: true, schema: { type: string } }
+    AnswerId: { name: answer_id, in: path, required: true, schema: { type: string } }
+    AssistId: { name: assist_id, in: path, required: true, schema: { type: string } }
+    ReportId: { name: report_id, in: path, required: true, schema: { type: string } }
+    Cursor: { name: cursor, in: query, schema: { type: string } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+
+  responses:
+    Error:
+      description: 錯誤
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    AssistResponse:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data: { $ref: '#/components/schemas/Assist' }
+    PiiReportResponse:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data: { $ref: '#/components/schemas/PiiReport' }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+    LanguageTag:
+      type: string
+      description: BCP 47 語言標籤
+      example: zh-TW
+
+    Category:
+      type: string
+      enum: [map_navigation, admin_procedure, document_contract, scam_check, app_usage, language, other]
+
+    AssistanceMode:
+      type: string
+      enum: [online, onsite, either]
+
+    QuestionStatus:
+      type: string
+      enum: [open, in_progress, resolved]
+
+    AssistStatus:
+      type: string
+      enum: [claimed, arrived, completed, cancelled]
+
+    PiiReportStatus:
+      type: string
+      enum: [pending, accepted, denied]
+
+    Coordinates:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+        accuracy_m: { type: number, minimum: 0 }
+
+    LocationSharing:
+      type: string
+      description: |
+        - `off`：完全關閉。不保存位置，不收也不發附近通知，不能使用現場協助。
+        - `approximate`：模糊位置，預設值。公開頁與通知只有約 500 公尺的位置；現場問題有人接案後，只把精確座標提供給接案者。
+        - `exact`：具體位置。附近通知會附上精確座標，接案者也能取得；公開頁仍只顯示模糊位置。
+      enum: ['off', approximate, exact]
+      default: approximate
+
+    PublicArea:
+      type: object
+      description: 公開的概略位置。座標對齊約 500 公尺的網格，距離也由網格點計算並取到百公尺。
+      required: [approx_lat, approx_lng]
+      properties:
+        approx_lat: { type: number }
+        approx_lng: { type: number }
+        district: { type: [string, 'null'], example: 中山區 }
+        distance_m: { type: [integer, 'null'], description: 查詢時有帶座標才有值 }
+
+    PublicUser:
+      type: object
+      required: [id, nickname, points]
+      properties:
+        id: { type: string }
+        nickname: { type: string }
+        points: { type: integer }
+
+    Me:
+      allOf:
+        - $ref: '#/components/schemas/PublicUser'
+        - type: object
+          required: [languages, nearby_notifications_enabled, nearby_radius_m, location_sharing]
+          properties:
+            languages:
+              type: array
+              items: { $ref: '#/components/schemas/LanguageTag' }
+            nearby_notifications_enabled: { type: boolean }
+            nearby_radius_m: { type: integer }
+            location_sharing: { $ref: '#/components/schemas/LocationSharing' }
+
+    UserProfile:
+      allOf:
+        - $ref: '#/components/schemas/PublicUser'
+        - type: object
+          required: [accepted_answer_count, completed_assist_count, badges]
+          properties:
+            accepted_answer_count: { type: integer }
+            completed_assist_count: { type: integer }
+            badges:
+              type: array
+              items: { $ref: '#/components/schemas/Badge' }
+
+    Badge:
+      type: object
+      required: [id, name, description, image_url, earned]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        image_url: { type: string, format: uri }
+        earned: { type: boolean }
+        earned_at: { type: [string, 'null'], format: date-time }
+        share_url: { type: [string, 'null'], format: uri, description: 已解鎖才有值，是可分享到社群的公開頁面 }
+
+    PointTransaction:
+      type: object
+      required: [id, amount, reason, created_at]
+      properties:
+        id: { type: string }
+        amount: { type: integer }
+        reason: { type: string, enum: [answer_accepted, assist_completed] }
+        question_id: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Media:
+      type: object
+      required: [id, kind, url]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [image, audio] }
+        url: { type: string, format: uri }
+        width: { type: integer }
+        height: { type: integer }
+        duration_seconds: { type: number }
+
+    HiddenPart:
+      type: object
+      description: 因個資標記待決定而暫時隱藏的內容
+      required: [part, reason]
+      properties:
+        part: { type: string, enum: [body, media] }
+        media_id: { type: string }
+        reason: { type: string, const: pii_pending }
+
+    QuestionContext:
+      type: object
+      description: 從城市通頁面發問時自動帶入，App 外的問題為 null。不可放使用者個資，`page_route` 不含 query string。
+      required: [service_id, service_name]
+      properties:
+        service_id: { type: string, example: fee-payment }
+        service_name: { type: string, example: 繳費服務 }
+        page_route: { type: string, example: /fee-payment/detail/:id }
+        page_title: { type: string }
+        extra:
+          type: object
+          additionalProperties: true
+          description: 由各功能自訂，最大 2 KB
+
+    CreateQuestionRequest:
+      type: object
+      required: [language, category, assistance_mode, client_request_id]
+      properties:
+        title: { type: string, maxLength: 80, description: 選填，未填時由 body 前 30 字產生 }
+        body: { type: string, maxLength: 5000 }
+        media_ids:
+          type: array
+          maxItems: 5
+          items: { type: string }
+        language: { $ref: '#/components/schemas/LanguageTag' }
+        category: { $ref: '#/components/schemas/Category' }
+        assistance_mode: { $ref: '#/components/schemas/AssistanceMode' }
+        context:
+          oneOf:
+            - $ref: '#/components/schemas/QuestionContext'
+            - type: 'null'
+        location_sharing:
+          allOf:
+            - $ref: '#/components/schemas/LocationSharing'
+          description: 這個問題的位置分享等級；未填時採用使用者的預設等級
+        location:
+          oneOf:
+            - $ref: '#/components/schemas/Coordinates'
+            - type: 'null'
+        client_request_id: { type: string, maxLength: 64 }
+
+    QuestionSummary:
+      type: object
+      required:
+        - id
+        - status
+        - title
+        - category
+        - language
+        - assistance_mode
+        - location_sharing
+        - author
+        - answer_count
+        - reward_points
+        - can_claim
+        - hidden_parts
+        - created_at
+      properties:
+        id: { type: string }
+        status: { $ref: '#/components/schemas/QuestionStatus' }
+        title: { type: [string, 'null'], description: 內容待個資確認時為 null }
+        category: { $ref: '#/components/schemas/Category' }
+        language: { $ref: '#/components/schemas/LanguageTag' }
+        assistance_mode: { $ref: '#/components/schemas/AssistanceMode' }
+        location_sharing: { $ref: '#/components/schemas/LocationSharing' }
+        author: { $ref: '#/components/schemas/PublicUser' }
+        context:
+          oneOf:
+            - $ref: '#/components/schemas/QuestionContext'
+            - type: 'null'
+        area:
+          oneOf:
+            - $ref: '#/components/schemas/PublicArea'
+            - type: 'null'
+        thumbnail_url: { type: [string, 'null'], format: uri }
+        has_audio: { type: boolean }
+        answer_count: { type: integer }
+        reward_points: { type: integer, description: 任務板顯示的可得積分 }
+        can_claim: { type: boolean, description: 目前使用者能否接下現場任務 }
+        hidden_parts:
+          type: array
+          items: { $ref: '#/components/schemas/HiddenPart' }
+        created_at: { type: string, format: date-time }
+
+    QuestionDetail:
+      allOf:
+        - $ref: '#/components/schemas/QuestionSummary'
+        - type: object
+          required: [body, media, is_author, accepted_answer_id, assist_status]
+          properties:
+            body: { type: [string, 'null'] }
+            media:
+              type: array
+              items: { $ref: '#/components/schemas/Media' }
+            is_author: { type: boolean }
+            accepted_answer_id: { type: [string, 'null'] }
+            assist_status:
+              description: 公開狀態，不含精確位置；沒有進行中或已完成的協助時為 null
+              oneOf:
+                - $ref: '#/components/schemas/AssistStatus'
+                - type: 'null'
+
+    VoteSummary:
+      type: object
+      description: 倒讚數只在後端用於排序和可信度評分，不回傳給任何人，包含回答者本人。
+      required: [upvotes, my_vote]
+      properties:
+        upvotes: { type: integer }
+        my_vote: { type: [integer, 'null'], enum: [1, -1, null], description: 使用者自己的投票，用於顯示按鈕狀態 }
+
+    Answer:
+      type: object
+      required: [id, question_id, author, body, media, is_accepted, votes, hidden_parts, created_at]
+      properties:
+        id: { type: string }
+        question_id: { type: string }
+        author: { $ref: '#/components/schemas/PublicUser' }
+        body: { type: [string, 'null'] }
+        media:
+          type: array
+          items: { $ref: '#/components/schemas/Media' }
+        language: { $ref: '#/components/schemas/LanguageTag' }
+        is_accepted: { type: boolean }
+        votes: { $ref: '#/components/schemas/VoteSummary' }
+        hidden_parts:
+          type: array
+          items: { $ref: '#/components/schemas/HiddenPart' }
+        created_at: { type: string, format: date-time }
+
+    Assist:
+      type: object
+      required: [id, question_id, status, asker, helper, exact_location, claimed_at]
+      properties:
+        id: { type: string }
+        question_id: { type: string }
+        status: { $ref: '#/components/schemas/AssistStatus' }
+        asker: { $ref: '#/components/schemas/PublicUser' }
+        helper: { $ref: '#/components/schemas/PublicUser' }
+        exact_location:
+          description: 僅 claimed、arrived 狀態有值
+          oneOf:
+            - $ref: '#/components/schemas/Coordinates'
+            - type: 'null'
+        claimed_at: { type: string, format: date-time }
+        arrived_at: { type: [string, 'null'], format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        cancelled_at: { type: [string, 'null'], format: date-time }
+        cancelled_by: { type: [string, 'null'], enum: [asker, helper, null] }
+        cancel_reason: { type: [string, 'null'] }
+
+    ImageRegion:
+      type: object
+      description: 以圖片寬高為基準的 0 到 1 比例座標
+      required: [x, y, w, h]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+        w: { type: number, exclusiveMinimum: 0, maximum: 1 }
+        h: { type: number, exclusiveMinimum: 0, maximum: 1 }
+
+    TextRange:
+      type: object
+      description: 以 Unicode code point 計算，end 不包含在內
+      required: [start, end]
+      properties:
+        start: { type: integer, minimum: 0 }
+        end: { type: integer, minimum: 1 }
+
+    CreatePiiReportRequest:
+      type: object
+      required: [target_type, target_id]
+      properties:
+        target_type: { type: string, enum: [question, answer] }
+        target_id: { type: string }
+        media_id: { type: string }
+        regions:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/ImageRegion' }
+        text_ranges:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/TextRange' }
+        text_field: { type: string, enum: [body, title], default: body, description: 只有問題能標記 title }
+
+    PiiReport:
+      type: object
+      required: [id, status, target_type, target_id, question_id, created_at]
+      properties:
+        id: { type: string }
+        status: { $ref: '#/components/schemas/PiiReportStatus' }
+        target_type: { type: string, enum: [question, answer] }
+        target_id: { type: string }
+        question_id: { type: string }
+        media_id: { type: [string, 'null'] }
+        text_field: { type: [string, 'null'], enum: [body, title, null] }
+        regions:
+          type: array
+          items: { $ref: '#/components/schemas/ImageRegion' }
+        text_ranges:
+          type: array
+          items: { $ref: '#/components/schemas/TextRange' }
+        original_text: { type: [string, 'null'], description: 僅 pending 時回傳給發問者 }
+        preview_url: { type: [string, 'null'], format: uri, description: 僅 pending 時回傳的短效連結 }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: [string, 'null'], format: date-time }
+
+    Notification:
+      type: object
+      required: [id, type, title, body, read, created_at]
+      properties:
+        id: { type: string }
+        type:
+          type: string
+          enum:
+            - nearby_question
+            - new_answer
+            - answer_accepted
+            - assist_claimed
+            - assist_arrived
+            - assist_completed
+            - assist_cancelled
+            - pii_report_pending
+            - pii_report_resolved
+            - badge_earned
+        title: { type: string }
+        body: { type: string }
+        question_id: { type: [string, 'null'] }
+        exact_location:
+          description: 只有 nearby_question 通知且問題等級為 exact 時有值；問題解決或撤回後清除
+          oneOf:
+            - $ref: '#/components/schemas/Coordinates'
+            - type: 'null'
+        read: { type: boolean }
+        created_at: { type: string, format: date-time }
