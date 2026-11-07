@@ -85,6 +85,7 @@ export function createSerializers({ db, config, signatures }) {
       },
       thumbnail_url: firstImage ? mediaUrl(req, firstImage.id, seen.needsSignature(firstImage.id)) : null,
       has_audio: files.some((f) => f.kind === 'audio'),
+      has_video: files.some((f) => f.kind === 'video'),
       answer_count: row.answer_count,
       reward_points: row.assistance_mode === 'online' ? config.points.answerAccepted : config.points.assistCompleted,
       can_claim: canClaim(req, row, viewerPoint),

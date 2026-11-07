@@ -131,7 +131,7 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 | GET | `/me` | 取得自己的資料與設定 | 是 |
 | PATCH | `/me` | 更新暱稱、語言與附近通知設定 | 是 |
 | POST | `/me/heartbeat` | 回報位置並取回未送達的通知 | 是 |
-| POST | `/media` | 上傳圖片或語音 | 是 |
+| POST | `/media` | 上傳圖片、語音或影片 | 是 |
 | GET | `/questions` | 問題列表（論壇與任務板共用） | 是 |
 | POST | `/questions` | 發問 | 是 |
 | GET | `/questions/{question_id}` | 問題詳情 | 是 |
@@ -300,18 +300,19 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 ### POST /media
 
-上傳圖片或語音。
+上傳圖片、語音或影片。
 
 圖片必須已在手機端完成個資遮蔽。後端會重新編碼圖片並移除 EXIF（含 GPS）。
+語音和影片不會重新編碼，檔內的中繼資料（可能含 GPS）會保留，前端要提醒使用者不要拍到個資。
 超過 24 小時未被問題或回答引用的檔案會被刪除。
 
 **請求內容**（`multipart/form-data`）
 
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
-| `file` | 檔案 | 是 | 圖片：JPEG、PNG、WebP，最大 10 MB；語音：M4A、AAC、MP3、WebM，最長 3 分鐘 |
-| `kind` | `image` \| `audio` | 是 |  |
-| `duration_seconds` | number |  | kind 為 audio 時必填 |
+| `file` | 檔案 | 是 | 圖片：JPEG、PNG、WebP，最大 10 MB；語音：M4A、AAC、MP3、WebM，最大 20 MB、最長 3 分鐘；影片：MP4、WebM，最大 20 MB、最長 60 秒 |
+| `kind` | `image` \| `audio` \| `video` | 是 |  |
+| `duration_seconds` | number |  | kind 為 audio 或 video 時必填，由前端提供，後端不驗證實際長度 |
 
 **回應**
 
@@ -364,6 +365,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `area` | [PublicArea](#publicarea) \| null |  |  |
 | `thumbnail_url` | string（URL） \| null |  |  |
 | `has_audio` | boolean |  |  |
+| `has_video` | boolean |  |  |
 | `answer_count` | integer | 是 |  |
 | `reward_points` | integer | 是 | 任務板顯示的可得積分 |
 | `can_claim` | boolean | 是 | 目前使用者能否接下現場任務 |
@@ -757,7 +759,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 發問者自己標記時會直接生效。
 
 - 圖片：填 `media_id` 與 `regions`
-- 語音：填 `media_id`；accept 後整段移除
+- 語音、影片：填 `media_id`；accept 後整段移除
 - 文字：填 `text_ranges`；標記問題標題時，`text_field` 填 `title`
 
 **請求內容**（`application/json`）
@@ -822,7 +824,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 同意遮蔽。
 
-僅限發問者。圖片會在伺服器上覆蓋不透明色塊並產生新檔與新 ID，原檔刪除；文字逐字換成 `█`，字數不變；語音整段移除。此操作不可逆。
+僅限發問者。圖片會在伺服器上覆蓋不透明色塊並產生新檔與新 ID，原檔刪除；文字逐字換成 `█`，字數不變；語音和影片整段移除。此操作不可逆。
 
 **參數**
 
@@ -1125,7 +1127,7 @@ BCP 47 語言標籤
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
 | `id` | string | 是 |  |
-| `kind` | `image` \| `audio` | 是 |  |
+| `kind` | `image` \| `audio` \| `video` | 是 |  |
 | `url` | string（URL） | 是 |  |
 | `width` | integer |  |  |
 | `height` | integer |  |  |
@@ -1184,6 +1186,7 @@ BCP 47 語言標籤
 | `area` | [PublicArea](#publicarea) \| null |  |  |
 | `thumbnail_url` | string（URL） \| null |  |  |
 | `has_audio` | boolean |  |  |
+| `has_video` | boolean |  |  |
 | `answer_count` | integer | 是 |  |
 | `reward_points` | integer | 是 | 任務板顯示的可得積分 |
 | `can_claim` | boolean | 是 | 目前使用者能否接下現場任務 |
@@ -1206,6 +1209,7 @@ BCP 47 語言標籤
 | `area` | [PublicArea](#publicarea) \| null |  |  |
 | `thumbnail_url` | string（URL） \| null |  |  |
 | `has_audio` | boolean |  |  |
+| `has_video` | boolean |  |  |
 | `answer_count` | integer | 是 |  |
 | `reward_points` | integer | 是 | 任務板顯示的可得積分 |
 | `can_claim` | boolean | 是 | 目前使用者能否接下現場任務 |

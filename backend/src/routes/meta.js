@@ -15,6 +15,8 @@ export function metaRoutes({ config }) {
         image_max_bytes: config.media.imageMaxBytes,
         audio_max_bytes: config.media.audioMaxBytes,
         audio_max_seconds: config.media.audioMaxSeconds,
+        video_max_bytes: config.media.videoMaxBytes,
+        video_max_seconds: config.media.videoMaxSeconds,
       },
     },
   }));

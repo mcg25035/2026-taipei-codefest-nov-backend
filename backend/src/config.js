@@ -54,6 +54,8 @@ export function loadConfig(overrides = {}) {
       imageMaxBytes: 10 * 1024 * 1024,
       audioMaxBytes: 20 * 1024 * 1024,
       audioMaxSeconds: 180,
+      videoMaxBytes: 20 * 1024 * 1024,
+      videoMaxSeconds: 60,
       unattachedTtlMs: 24 * 60 * 60_000,
     },
     ...overrides,

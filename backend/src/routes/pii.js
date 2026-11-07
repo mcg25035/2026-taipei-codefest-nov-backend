@@ -129,9 +129,9 @@ export function piiRoutes({ db, config, notifier, getRealtime, hourlyLimiter, si
 
     if (report.media_id) {
       const media = mediaById.get(report.media_id);
-      if (media.kind === 'audio') {
+      if (media.kind !== 'image') {
         db.transaction(() => {
-          // 語音無法局部遮蔽，整段移除後，同一檔案的其他標記也一併結案。
+          // 語音和影片無法局部遮蔽，整段移除後，同一檔案的其他標記也一併結案。
           db.prepare(`
             UPDATE pii_reports SET status = 'accepted', resolved_at = ? WHERE media_id = ? AND status = 'pending'
           `).run(nowIso(), media.id);

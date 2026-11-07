@@ -168,9 +168,10 @@ paths:
   /media:
     post:
       tags: [Media]
-      summary: 上傳圖片或語音
+      summary: 上傳圖片、語音或影片
       description: |
         圖片必須已在手機端完成個資遮蔽。後端會重新編碼圖片並移除 EXIF（含 GPS）。
+        語音和影片不會重新編碼，檔內的中繼資料（可能含 GPS）會保留，前端要提醒使用者不要拍到個資。
         超過 24 小時未被問題或回答引用的檔案會被刪除。
       operationId: uploadMedia
       requestBody:
@@ -181,9 +182,9 @@ paths:
               type: object
               required: [file, kind]
               properties:
-                file: { type: string, format: binary, description: '圖片：JPEG、PNG、WebP，最大 10 MB；語音：M4A、AAC、MP3、WebM，最長 3 分鐘' }
-                kind: { type: string, enum: [image, audio] }
-                duration_seconds: { type: number, description: kind 為 audio 時必填 }
+                file: { type: string, format: binary, description: '圖片：JPEG、PNG、WebP，最大 10 MB；語音：M4A、AAC、MP3、WebM，最大 20 MB、最長 3 分鐘；影片：MP4、WebM，最大 20 MB、最長 60 秒' }
+                kind: { type: string, enum: [image, audio, video] }
+                duration_seconds: { type: number, description: kind 為 audio 或 video 時必填，由前端提供，後端不驗證實際長度 }
       responses:
         '201':
           description: 已上傳
@@ -636,7 +637,7 @@ paths:
         發問者自己標記時會直接生效。
 
         - 圖片：填 `media_id` 與 `regions`
-        - 語音：填 `media_id`；accept 後整段移除
+        - 語音、影片：填 `media_id`；accept 後整段移除
         - 文字：填 `text_ranges`；標記問題標題時，`text_field` 填 `title`
       operationId: createPiiReport
       requestBody:
@@ -696,7 +697,7 @@ paths:
       tags: [PII]
       summary: 同意遮蔽
       description: |
-        僅限發問者。圖片會在伺服器上覆蓋不透明色塊並產生新檔與新 ID，原檔刪除；文字逐字換成 `█`，字數不變；語音整段移除。此操作不可逆。
+        僅限發問者。圖片會在伺服器上覆蓋不透明色塊並產生新檔與新 ID，原檔刪除；文字逐字換成 `█`，字數不變；語音和影片整段移除。此操作不可逆。
       operationId: acceptPiiReport
       responses:
         '200': { $ref: '#/components/responses/PiiReportResponse' }
@@ -1153,7 +1154,7 @@ components:
       required: [id, kind, url]
       properties:
         id: { type: string }
-        kind: { type: string, enum: [image, audio] }
+        kind: { type: string, enum: [image, audio, video] }
         url: { type: string, format: uri }
         width: { type: integer }
         height: { type: integer }
@@ -1247,6 +1248,7 @@ components:
             - type: 'null'
         thumbnail_url: { type: [string, 'null'], format: uri }
         has_audio: { type: boolean }
+        has_video: { type: boolean }
         answer_count: { type: integer }
         reward_points: { type: integer, description: 任務板顯示的可得積分 }
         can_claim: { type: boolean, description: 目前使用者能否接下現場任務 }

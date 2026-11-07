@@ -1272,3 +1272,70 @@ describe('分類器失敗時', () => {
     }
   });
 });
+
+describe('影片上傳', () => {
+  const mp4 = () => Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(200, 7)]);
+  const webm = () => Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(200, 7)]);
+  const upload = (user, bytes, type, duration = '10') => {
+    const form = new FormData();
+    form.set('kind', 'video');
+    if (duration !== null) form.set('duration_seconds', duration);
+    form.set('file', new Blob([bytes], { type }), 'clip');
+    return t.call('POST', '/media', { token: user.token, form });
+  };
+
+  test('MP4 和 WebM 可上傳下載，並支援分段讀取供播放器使用', async () => {
+    const user = await t.login();
+    const res = await upload(user, mp4(), 'video/mp4');
+    assert.equal(res.status, 201, res.raw);
+    assert.equal(res.body.data.kind, 'video');
+    assert.equal(res.body.data.duration_seconds, 10);
+    const file = await fetch(res.body.data.url);
+    assert.equal(file.headers.get('content-type'), 'video/mp4');
+    assert.equal(file.headers.get('x-content-type-options'), 'nosniff');
+    const part = await fetch(res.body.data.url, { headers: { Range: 'bytes=0-9' } });
+    assert.equal(part.status, 206);
+    assert.equal((await part.arrayBuffer()).byteLength, 10);
+    assert.equal((await upload(user, webm(), 'video/webm;codecs=vp9')).status, 201);
+  });
+
+  test('假影片、不支援的格式、超過大小或長度都會被拒絕', async () => {
+    const user = await t.login();
+    assert.equal((await upload(user, Buffer.from('<script>alert(1)</script>xxxxxxxx'), 'video/mp4')).status, 415);
+    assert.equal((await upload(user, mp4(), 'video/webm')).status, 415);
+    assert.equal((await upload(user, mp4(), 'video/quicktime')).status, 415);
+    assert.equal((await upload(user, Buffer.concat([mp4(), Buffer.alloc(21 * 1024 * 1024)]), 'video/mp4')).status, 413);
+    assert.equal((await upload(user, mp4(), 'video/mp4', '61')).status, 400);
+    assert.equal((await upload(user, mp4(), 'video/mp4', null)).status, 400);
+  });
+
+  test('問題可附影片；個資標記 accept 後整段移除，待確認時他人看不到', async () => {
+    const asker = await t.login();
+    const reporter = await t.login();
+    const video = (await upload(asker, mp4(), 'video/mp4')).body.data;
+    const q = await ask(asker, { media_ids: [video.id] });
+    assert.equal(q.has_video, true);
+    assert.equal(q.has_audio, false);
+    assert.equal(q.thumbnail_url, null);
+
+    const created = await t.call('POST', '/pii-reports', { token: reporter.token, body: { target_type: 'question', target_id: q.id, media_id: video.id } });
+    assert.equal(created.status, 201, created.raw);
+    assert.equal((await fetch(video.url)).status, 404);
+    const hidden = await t.call('GET', '/questions/{question_id}', { token: reporter.token, params: { question_id: q.id } });
+    assert.equal(hidden.body.data.has_video, false);
+    assert.deepEqual(hidden.body.data.media, []);
+
+    const accepted = await t.call('POST', '/pii-reports/{report_id}/accept', { token: asker.token, params: { report_id: created.body.data.id } });
+    assert.equal(accepted.status, 200, accepted.raw);
+    assert.equal((await fetch(video.url)).status, 404);
+    const after = await t.call('GET', '/questions/{question_id}', { token: asker.token, params: { question_id: q.id } });
+    assert.deepEqual(after.body.data.media, []);
+    assert.equal(fs.readdirSync(path.join(t.server.config.dataDir, 'media')).some((f) => f.startsWith(video.id)), false);
+  });
+
+  test('meta 回傳影片限制', async () => {
+    const { limits } = (await t.call('GET', '/meta')).body.data;
+    assert.equal(limits.video_max_bytes, 20 * 1024 * 1024);
+    assert.equal(limits.video_max_seconds, 60);
+  });
+});

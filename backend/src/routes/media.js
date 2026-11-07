@@ -11,6 +11,12 @@ const AUDIO_TYPES = {
   'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/webm': 'webm',
 };
 
+// 沒有 ffmpeg，所以只檢查檔頭，確認真的是影片容器；影片不會重新編碼。
+const VIDEO_TYPES = {
+  'video/mp4': { ext: 'mp4', matches: (b) => b.length > 8 && b.toString('latin1', 4, 8) === 'ftyp' },
+  'video/webm': { ext: 'webm', matches: (b) => b.length > 4 && b.readUInt32BE(0) === 0x1a45dfa3 },
+};
+
 const tooLarge = () => new ApiError(413, 'FILE_TOO_LARGE', '檔案過大');
 const unsupported = () => new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', '檔案格式不支援');
 
@@ -59,14 +65,26 @@ export function mediaRoutes({ db, config, serializers }) {
     return { data: file.buffer, ext, mime: file.mimetype.split(';')[0].trim(), width: null, height: null, duration };
   };
 
+  const processVideo = (file, duration) => {
+    if (file.size > config.media.videoMaxBytes) throw tooLarge();
+    const mime = file.mimetype.split(';')[0].trim();
+    const type = VIDEO_TYPES[mime];
+    if (!type?.matches(file.buffer)) throw unsupported();
+    if (!Number.isFinite(duration) || duration <= 0 || duration > config.media.videoMaxSeconds) {
+      throw validationError(`duration_seconds 必須介於 0 到 ${config.media.videoMaxSeconds}`, { field: 'duration_seconds' });
+    }
+    return { data: file.buffer, ext: type.ext, mime, width: null, height: null, duration };
+  };
+
   router.post('/media', async (req, res) => {
     await parseUpload(req, res);
-    const kind = requireEnum(req.body?.kind, ['image', 'audio'], 'kind');
+    const kind = requireEnum(req.body?.kind, ['image', 'audio', 'video'], 'kind');
     if (!req.file) throw validationError('缺少 file', { field: 'file' });
 
+    const duration = Number(req.body.duration_seconds);
     const processed = kind === 'image'
       ? await processImage(req.file)
-      : processAudio(req.file, Number(req.body.duration_seconds));
+      : kind === 'audio' ? processAudio(req.file, duration) : processVideo(req.file, duration);
 
     const id = newId('m');
     const filename = `${id}.${processed.ext}`;
