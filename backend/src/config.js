@@ -30,6 +30,13 @@ export function loadConfig(overrides = {}) {
     embeddingUrl: env.EMBEDDING_URL?.replace(/\/$/, '') || null,
     semanticCacheThreshold: Number(env.SEMANTIC_CACHE_THRESHOLD ?? 0.88),
     embeddingBackfillMs: 60_000,
+    // 回覆後多久內標記已解決，才算機器人解決的。
+    cacheResolveWindowMs: 10 * 60_000,
+    // 每一分調整多少相似度；扣到封鎖分數就不再引用。
+    cacheScoreStep: 0.01,
+    cacheMaxBoost: 0.02,
+    cacheMaxPenalty: 0.05,
+    cacheBlockScore: -3,
     sessionTtlDays: 30,
     heartbeatSeconds: 60,
     push: {

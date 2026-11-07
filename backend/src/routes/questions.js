@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { ApiError, forbidden, notFound, validationError } from '../errors.js';
 import { distanceM, snap } from '../geo.js';
-import { matchTagKeys, parseTags, tagKey } from '../tags.js';
+import { matchTagKeys, parseTags, systemTagOf, tagKey } from '../tags.js';
 import {
   ASSISTANCE_MODES, CATEGORIES, LOCATION_LEVELS, QUESTION_STATUSES, decodeCursor, encodeCursor, isObject, newId, nowIso,
   optionalString, parseCoordinates, parseLanguage, parseLimit, parseMediaIds, queryNumber, requireBodyObject, requireEnum, requireString,
@@ -54,6 +54,16 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       @approx_lat, @approx_lng, @exact_lat, @exact_lng, @client_request_id, @created_at)
   `);
   const insertTag = db.prepare('INSERT INTO question_tags (question_id, tag_key, tag, position) VALUES (?, ?, ?, ?)');
+  const removeSystemTag = db.prepare('DELETE FROM question_tags WHERE question_id = ? AND is_system = 1');
+  const insertSystemTag = db.prepare(`
+    INSERT INTO question_tags (question_id, tag_key, tag, position, is_system) VALUES (?, ?, ?, -1, 1)
+    ON CONFLICT (question_id, tag_key) DO UPDATE SET is_system = 1, position = -1
+  `);
+  const setSystemTag = (questionId, category) => {
+    removeSystemTag.run(questionId);
+    const label = systemTagOf(category);
+    insertSystemTag.run(questionId, tagKey(label), label);
+  };
   const attach = db.prepare(`
     UPDATE media SET question_id = ?, position = ? WHERE id = ? AND owner_id = ? AND question_id IS NULL AND answer_id IS NULL
   `);
@@ -110,6 +120,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
           throw validationError('media_ids 含有不存在或已被使用的檔案', { field: 'media_ids', media_id: mediaId });
         }
       });
+      setSystemTag(id, category);
       tags.forEach(({ key, tag }, position) => insertTag.run(id, key, tag, position));
     });
     create();
@@ -247,13 +258,15 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       purgeNotificationLocation.run(row.id);
       if (isAdmin) audit.record(req.user.id, 'question.resolve', 'question', row.id);
     })();
+    // 管理員代為標記不代表發問者滿意，不算回饋。
+    if (row.author_id === req.user.id) semanticCache.questionResolved(row);
     getRealtime().questionChanged(row.id);
     getRealtime().feedChanged();
     res.json({ data: serializers.questionDetail(req, byId.get(row.id)) });
   });
 
-  const tagsOf = db.prepare('SELECT tag_key FROM question_tags WHERE question_id = ?');
-  const clearTags = db.prepare('DELETE FROM question_tags WHERE question_id = ?');
+  const tagsOf = db.prepare('SELECT tag_key FROM question_tags WHERE question_id = ? AND is_system = 0');
+  const clearTags = db.prepare('DELETE FROM question_tags WHERE question_id = ? AND is_system = 0');
 
   // 發問者可以任意修改；其他人只能新增，避免別人的標籤被刪掉，發問者也能移除不想要的標籤。
   router.put('/questions/:id/tags', (req, res) => {
@@ -293,6 +306,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     }
     db.transaction(() => {
       updateCategory.run(category, row.id);
+      setSystemTag(row.id, category);
       if (isAdmin) audit.record(req.user.id, 'question.category', 'question', row.id, { before: row.category, after: category });
     })();
     getRealtime().questionChanged(row.id);
@@ -330,7 +344,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       body: row.body,
       category: row.category,
       author_id: row.author_id,
-      tags: tagsOf.all(row.id).map((t) => t.tag_key),
+      tags: serializers.questionDetail(req, row).tags,
       answers: db.prepare('SELECT id, author_id, body FROM answers WHERE question_id = ?').all(row.id),
       media: files.map((f) => ({ id: f.id, kind: f.kind })),
     };

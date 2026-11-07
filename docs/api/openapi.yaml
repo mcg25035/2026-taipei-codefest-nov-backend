@@ -347,12 +347,12 @@ paths:
       - { $ref: '#/components/parameters/QuestionId' }
     put:
       tags: [Question]
-      summary: 設定問題的自訂標籤
+      summary: 設定問題的手動標籤
       description: |
-        傳入完整的標籤清單，會取代現有標籤。
+        傳入完整的手動標籤清單，會取代現有的手動標籤；固定標籤不受影響，把回傳的 `tags` 整包送回來也可以。
         發問者和管理員可以新增或移除；其他登入者只能新增，移除別人的標籤回傳 403。低可信度帳號回傳 403。
         管理員的修改會留下稽核紀錄。
-        最多 5 個，每個 1 到 20 字，只能有文字、數字、空白、`-`、`_`、`·`；開頭的 `#` 會被移除。重複的標籤會合併。
+        手動標籤最多 5 個，每個 1 到 20 字，只能有文字、數字、空白、`-`、`_`、`·`；開頭的 `#` 會被移除。重複的標籤會合併。
       operationId: setQuestionTags
       requestBody:
         required: true
@@ -364,7 +364,6 @@ paths:
               properties:
                 tags:
                   type: array
-                  maxItems: 5
                   items: { type: string }
       responses:
         '200':
@@ -386,6 +385,7 @@ paths:
       tags: [Question]
       summary: 搜尋標籤
       description: |
+        固定標籤和手動標籤都會被搜尋到。
         有 `q` 時模糊比對並依相似度排序，能接受部分符合、詞序不同和打錯字；沒有 `q` 時回傳最多人使用的標籤。
         比對時不分大小寫、全半形和臺台，也忽略空白和分隔符號。可用於輸入標籤時的自動完成。
       operationId: searchTags
@@ -418,9 +418,10 @@ paths:
       - { $ref: '#/components/parameters/QuestionId' }
     put:
       tags: [Question]
-      summary: 替問題分類
+      summary: 修改固定標籤
       description: |
-        任何登入者都能替 `uncategorized` 的問題分類；已分類的問題回傳 409 `INVALID_STATE`。
+        傳入分類代碼，例如 `scam_check`，`tags` 和 `system_tag` 會跟著更新；可選的值見 `GET /meta`。
+        任何登入者都能替 `uncategorized`（未分類）的問題分類；已分類的問題回傳 409 `INVALID_STATE`。
         發問者隨時可以修改自己的問題。不能改回 `uncategorized`，低可信度帳號回傳 403。
         管理員可以修改任何問題，也能改回 `uncategorized`，操作會留下稽核紀錄。
         分類不會獲得積分。可用 `GET /questions?category=uncategorized` 列出待分類的問題。
@@ -1272,6 +1273,46 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
 
+  /admin/analytics/cache:
+    get:
+      tags: [Admin]
+      summary: 語意快取的解答評分
+      description: |
+        列出被快取引用過的解答，分數最低的在前，方便找出常配對錯的解答。
+        加分：機器人回覆後 10 分鐘內發問者標記已解決且沒有別人回答，或採納機器人的回答。
+        扣分：發問者對機器人的回答按倒讚，或採納別人的回答。
+        分數每分調整比對門檻 0.01（最多放寬 0.02、最多收緊 0.05），`score` 降到 -3 就不再被引用。
+      operationId: adminAnalyticsCache
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [source_answer_id, source_question_id, question_title, answer_body, score, positive_count, negative_count, reply_count, blocked, updated_at]
+                      properties:
+                        source_answer_id: { type: string }
+                        source_question_id: { type: string }
+                        question_title: { type: [string, 'null'], description: 來源已被刪除時為 null }
+                        answer_body: { type: [string, 'null'], description: 來源已被刪除時為 null }
+                        score: { type: integer }
+                        positive_count: { type: integer }
+                        negative_count: { type: integer }
+                        reply_count: { type: integer }
+                        blocked: { type: boolean }
+                        updated_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
   /admin/audit-log:
     get:
       tags: [Admin]
@@ -1596,8 +1637,7 @@ components:
         language: { $ref: '#/components/schemas/LanguageTag' }
         tags:
           type: array
-          maxItems: 5
-          description: 選填的自訂標籤，和 `category` 並存。每個 1 到 20 字
+          description: 選填的手動標籤，每個 1 到 20 字。固定標籤由後端決定，送了也會被略過
           items: { type: string }
         category:
           allOf:
@@ -1627,6 +1667,7 @@ components:
         - category
         - language
         - tags
+        - system_tag
         - assistance_mode
         - location_sharing
         - author
@@ -1639,10 +1680,16 @@ components:
         id: { type: string }
         status: { $ref: '#/components/schemas/QuestionStatus' }
         title: { type: [string, 'null'], description: 內容待個資確認時為 null }
-        category: { $ref: '#/components/schemas/Category' }
+        category:
+          allOf:
+            - $ref: '#/components/schemas/Category'
+          deprecated: true
+          description: 即將移除，請改用 `tags` 和 `system_tag`
         tags:
           type: array
+          description: 第一個一定是固定標籤，後面是手動標籤。前端全部當標籤顯示即可
           items: { type: string }
+        system_tag: { type: string, description: 後端決定的固定標籤，不可手動移除 }
         language: { $ref: '#/components/schemas/LanguageTag' }
         assistance_mode: { $ref: '#/components/schemas/AssistanceMode' }
         location_sharing: { $ref: '#/components/schemas/LocationSharing' }
@@ -1706,7 +1753,7 @@ components:
         language: { $ref: '#/components/schemas/LanguageTag' }
         is_accepted: { type: boolean }
         cached_from:
-          description: 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答
+          description: 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答。建議提供「解決了」和倒讚按鈕，這些反應會影響快取評分
           oneOf:
             - type: object
               required: [question_id, answer_id, similarity]

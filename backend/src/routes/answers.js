@@ -5,7 +5,7 @@ import {
   requireBodyObject, requireEnum,
 } from '../util.js';
 
-export function answerRoutes({ db, config, serializers, notifier, getRealtime, limiter, rewards, removeMediaFiles, audit }) {
+export function answerRoutes({ db, config, serializers, notifier, getRealtime, limiter, rewards, removeMediaFiles, audit, semanticCache }) {
   const router = Router();
   const questionById = db.prepare('SELECT * FROM questions WHERE id = ?');
   const answerById = db.prepare('SELECT * FROM answers WHERE id = ?');
@@ -135,6 +135,7 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
       questionId: question.id,
     });
     rewards.awardBadges(answer.author_id);
+    semanticCache.answerAccepted(question, answerById.get(answer.id));
     signalAnswers(question.id);
     getRealtime().questionChanged(question.id);
     getRealtime().feedChanged();
@@ -223,6 +224,7 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
     if (value !== 1 && value !== -1) throw validationError('value 必須是 1 或 -1', { field: 'value' });
     if (answer.author_id === req.user.id && value === -1) throw new ApiError(403, 'SELF_ACTION_NOT_ALLOWED', '不能對自己的回答投倒讚');
     changeVote(answer, req.user.id, value);
+    semanticCache.answerVoted(questionById.get(answer.question_id), answer, req.user.id, value);
     signalAnswers(answer.question_id);
     res.json({ data: serializers.voteSummary(answerById.get(answer.id), req.user.id) });
   });
@@ -231,6 +233,7 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
     const answer = answerById.get(req.params.id);
     if (!answer) throw notFound();
     changeVote(answer, req.user.id, null);
+    semanticCache.answerVoted(questionById.get(answer.question_id), answer, req.user.id, null);
     signalAnswers(answer.question_id);
     res.json({ data: serializers.voteSummary(answerById.get(answer.id), req.user.id) });
   });

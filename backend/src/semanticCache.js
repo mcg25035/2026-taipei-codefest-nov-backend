@@ -47,11 +47,15 @@ export function createSemanticCache({ db, config, notifier, getRealtime }) {
 
   const saveVector = db.prepare('INSERT OR REPLACE INTO question_embeddings (question_id, vector) VALUES (?, ?)');
   const candidates = db.prepare(`
-    SELECT q.id AS question_id, a.id AS answer_id, a.body, a.language, e.vector
+    SELECT q.id AS question_id, a.id AS answer_id, a.body, a.language, e.vector, COALESCE(s.score, 0) AS score
     FROM question_embeddings e
     JOIN questions q ON q.id = e.question_id
     JOIN answers a ON a.id = q.accepted_answer_id
-    WHERE q.id != ? AND a.body IS NOT NULL AND TRIM(a.body) != ''
+    LEFT JOIN cache_scores s ON s.source_answer_id = a.id
+    WHERE q.id != @id AND a.body IS NOT NULL AND TRIM(a.body) != ''
+      -- 機器人的回答不當來源，否則前綴會疊加，分數也會分散。
+      AND a.cached_from_answer_id IS NULL
+      AND COALESCE(s.score, 0) > @block
       AND NOT EXISTS (
         SELECT 1 FROM pii_reports r WHERE r.status = 'pending' AND (
           (r.target_type = 'answer' AND r.target_id = a.id) OR (r.target_type = 'question' AND r.target_id = q.id)
@@ -71,12 +75,45 @@ export function createSemanticCache({ db, config, notifier, getRealtime }) {
 
   const findMatch = (questionId, vector) => {
     let best = null;
-    for (const row of candidates.iterate(questionId)) {
+    for (const row of candidates.iterate({ id: questionId, block: config.cacheBlockScore })) {
       const similarity = dot(vector, fromBlob(row.vector));
-      if (!best || similarity > best.similarity) best = { ...row, similarity };
+      const adjustment = Math.max(-config.cacheMaxPenalty, Math.min(config.cacheMaxBoost, row.score * config.cacheScoreStep));
+      const adjusted = similarity + adjustment;
+      if (!best || adjusted > best.adjusted) best = { ...row, similarity, adjusted };
     }
-    return best && best.similarity >= config.semanticCacheThreshold ? best : null;
+    return best && best.adjusted >= config.semanticCacheThreshold ? best : null;
   };
+
+  const setFeedbackColumn = db.prepare('UPDATE answers SET cache_feedback = ? WHERE id = ?');
+  const upsertScore = db.prepare(`
+    INSERT INTO cache_scores (source_answer_id, source_question_id, score, positive_count, negative_count, updated_at)
+    VALUES (@answer, @question, @score, @positive, @negative, @now)
+    ON CONFLICT (source_answer_id) DO UPDATE SET
+      score = score + excluded.score,
+      positive_count = positive_count + excluded.positive_count,
+      negative_count = negative_count + excluded.negative_count,
+      updated_at = excluded.updated_at
+  `);
+  const cachedAnswersOf = db.prepare('SELECT * FROM answers WHERE question_id = ? AND cached_from_answer_id IS NOT NULL');
+  const humanAnswerCount = db.prepare(`
+    SELECT COUNT(*) AS n FROM answers WHERE question_id = @question AND author_id != @author AND cached_from_answer_id IS NULL
+  `);
+
+  // 一則快取回答只算一次；回饋改變時先扣回舊的，再算新的。
+  const setFeedback = db.transaction((answer, next) => {
+    const previous = answer.cache_feedback;
+    if (previous === next) return;
+    const value = (feedback) => (feedback === 'positive' ? 1 : feedback === 'negative' ? -1 : 0);
+    upsertScore.run({
+      answer: answer.cached_from_answer_id,
+      question: answer.cached_from_question_id,
+      score: value(next) - value(previous),
+      positive: (next === 'positive' ? 1 : 0) - (previous === 'positive' ? 1 : 0),
+      negative: (next === 'negative' ? 1 : 0) - (previous === 'negative' ? 1 : 0),
+      now: nowIso(),
+    });
+    setFeedbackColumn.run(next, answer.id);
+  });
 
   async function handleNewQuestion(question) {
     const text = questionText(question);
@@ -116,9 +153,8 @@ export function createSemanticCache({ db, config, notifier, getRealtime }) {
 
   // 模型服務沒開時建立的問題，等服務恢復後補算，舊問題才找得到。
   async function backfill() {
-    for (const row of missingVectors.all()) {
-      const text = questionText(row);
-      if (text) saveVector.run(row.id, toBlob(await embedder.embed(text)));
+    for (let rows = missingVectors.all(); rows.length; rows = missingVectors.all()) {
+      for (const row of rows) saveVector.run(row.id, toBlob(await embedder.embed(questionText(row))));
     }
   }
   const timer = embedder ? setInterval(() => track(backfill()), config.embeddingBackfillMs) : null;
@@ -127,6 +163,33 @@ export function createSemanticCache({ db, config, notifier, getRealtime }) {
 
   return {
     enabled: Boolean(embedder),
+
+    // 回覆後不久就標記已解決，而且沒有別人回答，才視為機器人解決的。
+    questionResolved(question) {
+      const human = humanAnswerCount.get({ question: question.id, author: question.author_id }).n;
+      if (human > 0) return;
+      for (const answer of cachedAnswersOf.all(question.id)) {
+        const elapsed = Date.now() - Date.parse(answer.created_at);
+        if (!answer.cache_feedback && elapsed <= config.cacheResolveWindowMs) setFeedback(answer, 'positive');
+      }
+    },
+
+    // 採納機器人的回答是加分；有機器人回答卻採納別人的，表示舊解答不適用。
+    answerAccepted(question, accepted) {
+      if (accepted.cached_from_answer_id) {
+        setFeedback(accepted, 'positive');
+        return;
+      }
+      for (const answer of cachedAnswersOf.all(question.id)) setFeedback(answer, 'negative');
+    },
+
+    // 只有發問者的投票算數，避免別人灌票影響快取。
+    answerVoted(question, answer, voterId, value) {
+      if (!answer.cached_from_answer_id || voterId !== question.author_id) return;
+      if (value === -1) setFeedback(answer, 'negative');
+      else if (answer.cache_feedback === 'negative') setFeedback(answer, null);
+    },
+
     questionCreated(question) {
       if (embedder) track(handleNewQuestion(question));
     },

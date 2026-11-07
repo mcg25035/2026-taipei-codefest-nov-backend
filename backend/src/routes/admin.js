@@ -15,7 +15,7 @@ const adminUser = (row) => ({
   created_at: row.created_at,
 });
 
-export function adminRoutes({ db, audit, serializers, notifier, getRealtime, requireAdmin }) {
+export function adminRoutes({ db, config, audit, serializers, notifier, getRealtime, requireAdmin }) {
   const router = Router();
   router.use(requireAdmin);
   const userById = db.prepare('SELECT * FROM users WHERE id = ?');
@@ -219,6 +219,32 @@ export function adminRoutes({ db, audit, serializers, notifier, getRealtime, req
               .sort((a, b) => b.count - a.count),
           })),
       },
+    });
+  });
+
+  router.get('/analytics/cache', (req, res) => {
+    const limit = parseLimit(req.query);
+    const rows = db.prepare(`
+      SELECT s.*, q.title, a.body,
+        (SELECT COUNT(*) FROM answers c WHERE c.cached_from_answer_id = s.source_answer_id) AS reply_count
+      FROM cache_scores s
+      LEFT JOIN questions q ON q.id = s.source_question_id
+      LEFT JOIN answers a ON a.id = s.source_answer_id
+      ORDER BY s.score ASC, s.updated_at DESC LIMIT ?
+    `).all(limit);
+    res.json({
+      data: rows.map((row) => ({
+        source_answer_id: row.source_answer_id,
+        source_question_id: row.source_question_id,
+        question_title: row.title,
+        answer_body: row.body,
+        score: row.score,
+        positive_count: row.positive_count,
+        negative_count: row.negative_count,
+        reply_count: row.reply_count,
+        blocked: row.score <= config.cacheBlockScore,
+        updated_at: row.updated_at,
+      })),
     });
   });
 

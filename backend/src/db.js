@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { tagKey } from './tags.js';
+import { CATEGORIES } from './util.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -64,6 +66,7 @@ CREATE TABLE IF NOT EXISTS answers (
   cached_from_question_id TEXT,
   cached_from_answer_id TEXT,
   cached_similarity REAL,
+  cache_feedback TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_answers_question ON answers (question_id);
@@ -94,6 +97,7 @@ CREATE TABLE IF NOT EXISTS question_tags (
   tag_key TEXT NOT NULL,
   tag TEXT NOT NULL,
   position INTEGER NOT NULL,
+  is_system INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (question_id, tag_key)
 );
 CREATE INDEX IF NOT EXISTS idx_question_tags_key ON question_tags (tag_key);
@@ -110,6 +114,14 @@ CREATE INDEX IF NOT EXISTS idx_admin_actions_created ON admin_actions (created_a
 CREATE TABLE IF NOT EXISTS question_embeddings (
   question_id TEXT PRIMARY KEY REFERENCES questions(id),
   vector BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cache_scores (
+  source_answer_id TEXT PRIMARY KEY,
+  source_question_id TEXT NOT NULL,
+  score INTEGER NOT NULL DEFAULT 0,
+  positive_count INTEGER NOT NULL DEFAULT 0,
+  negative_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS assists (
   id TEXT PRIMARY KEY,
@@ -204,5 +216,19 @@ export function openDatabase(dataDir) {
       ALTER TABLE answers ADD COLUMN cached_similarity REAL;
     `);
   }
+  if (!answerColumns.has('cache_feedback')) db.exec('ALTER TABLE answers ADD COLUMN cache_feedback TEXT');
+  const tagColumns = new Set(db.prepare('PRAGMA table_info(question_tags)').all().map((c) => c.name));
+  if (!tagColumns.has('is_system')) db.exec('ALTER TABLE question_tags ADD COLUMN is_system INTEGER NOT NULL DEFAULT 0');
+  // 舊問題補上固定標籤；已有同名手動標籤時，直接把它轉成固定標籤。
+  const backfill = db.prepare(`
+    INSERT INTO question_tags (question_id, tag_key, tag, position, is_system)
+    SELECT q.id, @key, @label, -1, 1 FROM questions q
+    WHERE q.category = @category
+      AND NOT EXISTS (SELECT 1 FROM question_tags t WHERE t.question_id = q.id AND t.is_system = 1)
+    ON CONFLICT (question_id, tag_key) DO UPDATE SET is_system = 1, position = -1
+  `);
+  db.transaction(() => {
+    for (const [category, label] of Object.entries(CATEGORIES)) backfill.run({ category, label, key: tagKey(label) });
+  })();
   return db;
 }

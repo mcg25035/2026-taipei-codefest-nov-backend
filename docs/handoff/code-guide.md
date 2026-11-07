@@ -67,6 +67,10 @@ docs/
 
 **不要直接改 `api-spec.md`**，它是由 `openapi.yaml` 和 `docs/api/generate/header.md` 產生的，改了會被覆蓋。
 
+## 標籤
+
+`questions.category` 仍是固定標籤的來源，`question_tags` 另存一列 `is_system = 1` 的中文名稱，搜尋才能一起比對。修改 category 時要透過 `setSystemTag` 同步。API 的 `category` 已標為即將移除，移除後這個欄位可以留在內部當代碼。
+
 ## 身份與管理員
 
 `users.role` 是 `user`、`admin` 或 `bot`。Bot 除了回傳的身份，權限和一般使用者相同。

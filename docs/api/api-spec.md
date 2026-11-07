@@ -1,6 +1,6 @@
 # 後端 API 規格
 
-這份文件列出後端全部 48 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
+這份文件列出後端全部 49 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
 
 - **Base URL：** `https://tpcodefest.mcloudtw.com/api/v1`
 - **平台：** 只支援 Android
@@ -39,8 +39,8 @@ curl -X POST $BASE/questions \
 - **分頁：** 列表回傳 `next_cursor`，把它放進下一次的 `cursor`；值為 `null` 表示沒有下一頁。參數 `limit` 可填 1 到 50，預設 20。
 - **防重送：** 網路不穩時，用相同的 `client_request_id` 重送，不會重複建立內容。
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
-- **標籤：** 除了分類，問題可帶最多 5 個自訂標籤。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
-- **語意快取：** 發問後可能很快收到機器人的回答，`author.role` 是 `bot`，`cached_from` 有值。收到 `answers.changed` 時重抓就會看到，介面要標示這是舊解答。
+- **標籤：** `tags` 第一個是後端判定的固定標籤（`system_tag`），後面最多 5 個手動標籤，前端全部當標籤顯示，只有固定標籤不能讓人刪除。`category` 即將移除。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
+- **語意快取：** 發問後可能很快收到機器人的回答，`author.role` 是 `bot`，`cached_from` 有值。收到 `answers.changed` 時重抓就會看到，介面要標示這是舊解答。發問者按「已解決」、採納或倒讚，會調整這則解答之後被引用的機會。
 - **媒體：** 先呼叫 `POST /media` 取得 `id`，再放進問題或回答的 `media_ids`。超過 24 小時未使用的檔案會被刪除。
 - **不會回傳的資料：** 倒讚數只留在後端；可信度評分只有管理員 API 看得到。
 - **身份：** 使用者資料都有 `role`：`user`、`admin`、`bot`。`bot` 的權限和一般使用者相同，前端要標示它是機器人。
@@ -141,9 +141,9 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 | GET | `/questions/{question_id}` | 問題詳情 | 是 |
 | DELETE | `/questions/{question_id}` | 撤回問題 | 是 |
 | POST | `/questions/{question_id}/resolve` | 發問者標記問題已解決 | 是 |
-| PUT | `/questions/{question_id}/tags` | 設定問題的自訂標籤 | 是 |
+| PUT | `/questions/{question_id}/tags` | 設定問題的手動標籤 | 是 |
 | GET | `/tags` | 搜尋標籤 | 是 |
-| PUT | `/questions/{question_id}/category` | 替問題分類 | 是 |
+| PUT | `/questions/{question_id}/category` | 修改固定標籤 | 是 |
 | GET | `/questions/{question_id}/answers` | 回答列表 | 是 |
 | POST | `/questions/{question_id}/answers` | 回答問題 | 是 |
 | DELETE | `/answers/{answer_id}` | 刪除自己的回答 | 是 |
@@ -176,6 +176,7 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 | PATCH | `/admin/answers/{answer_id}` | 修改回答內容 | 是 |
 | GET | `/admin/pii-reports` | 列出所有個資標記 | 是 |
 | GET | `/admin/analytics/pages` | 依頁面統計問題數 | 是 |
+| GET | `/admin/analytics/cache` | 語意快取的解答評分 | 是 |
 | GET | `/admin/audit-log` | 稽核紀錄 | 是 |
 | GET | `/meta` | 前端需要的列舉與限制 | 否 |
 | GET | `/healthz` | 健康檢查 | 否 |
@@ -375,8 +376,9 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `id` | string | 是 |  |
 | `status` | [QuestionStatus](#questionstatus) | 是 |  |
 | `title` | string \| null | 是 | 內容待個資確認時為 null |
-| `category` | [Category](#category) | 是 |  |
-| `tags` | string[] | 是 |  |
+| `category` | [Category](#category) | 是 | 即將移除，請改用 `tags` 和 `system_tag` |
+| `tags` | string[] | 是 | 第一個一定是固定標籤，後面是手動標籤。前端全部當標籤顯示即可 |
+| `system_tag` | string | 是 | 後端決定的固定標籤，不可手動移除 |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |
@@ -415,7 +417,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `body` | string |  | 最長 5000 字 |
 | `media_ids` | string[] |  | 最多 5 項 |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
-| `tags` | string[] |  | 選填的自訂標籤，和 `category` 並存。每個 1 到 20 字。最多 5 項 |
+| `tags` | string[] |  | 選填的手動標籤，每個 1 到 20 字。固定標籤由後端決定，送了也會被略過 |
 | `category` | [Category](#category) |  | 選填。未填時由分類器判斷，信心不足或沒有文字時為 `uncategorized` |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `context` | [QuestionContext](#questioncontext) \| null |  |  |
@@ -482,12 +484,12 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 ### PUT /questions/{question_id}/tags
 
-設定問題的自訂標籤。
+設定問題的手動標籤。
 
-傳入完整的標籤清單，會取代現有標籤。
+傳入完整的手動標籤清單，會取代現有的手動標籤；固定標籤不受影響，把回傳的 `tags` 整包送回來也可以。
 發問者和管理員可以新增或移除；其他登入者只能新增，移除別人的標籤回傳 403。低可信度帳號回傳 403。
 管理員的修改會留下稽核紀錄。
-最多 5 個，每個 1 到 20 字，只能有文字、數字、空白、`-`、`_`、`·`；開頭的 `#` 會被移除。重複的標籤會合併。
+手動標籤最多 5 個，每個 1 到 20 字，只能有文字、數字、空白、`-`、`_`、`·`；開頭的 `#` 會被移除。重複的標籤會合併。
 
 **參數**
 
@@ -499,7 +501,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
-| `tags` | string[] | 是 | 最多 5 項 |
+| `tags` | string[] | 是 |  |
 
 **回應**
 
@@ -510,6 +512,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 搜尋標籤。
 
+固定標籤和手動標籤都會被搜尋到。
 有 `q` 時模糊比對並依相似度排序，能接受部分符合、詞序不同和打錯字；沒有 `q` 時回傳最多人使用的標籤。
 比對時不分大小寫、全半形和臺台，也忽略空白和分隔符號。可用於輸入標籤時的自動完成。
 
@@ -534,9 +537,10 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 ### PUT /questions/{question_id}/category
 
-替問題分類。
+修改固定標籤。
 
-任何登入者都能替 `uncategorized` 的問題分類；已分類的問題回傳 409 `INVALID_STATE`。
+傳入分類代碼，例如 `scam_check`，`tags` 和 `system_tag` 會跟著更新；可選的值見 `GET /meta`。
+任何登入者都能替 `uncategorized`（未分類）的問題分類；已分類的問題回傳 409 `INVALID_STATE`。
 發問者隨時可以修改自己的問題。不能改回 `uncategorized`，低可信度帳號回傳 403。
 管理員可以修改任何問題，也能改回 `uncategorized`，操作會留下稽核紀錄。
 分類不會獲得積分。可用 `GET /questions?category=uncategorized` 列出待分類的問題。
@@ -617,7 +621,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `media` | [Media](#media)[] | 是 |  |
 | `language` | [LanguageTag](#languagetag) |  |  |
 | `is_accepted` | boolean | 是 |  |
-| `cached_from` | object \| null |  | 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答 |
+| `cached_from` | object \| null |  | 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答。建議提供「解決了」和倒讚按鈕，這些反應會影響快取評分 |
 | `votes` | [VoteSummary](#votesummary) | 是 |  |
 | `hidden_parts` | [HiddenPart](#hiddenpart)[] | 是 |  |
 | `created_at` | string（時間） | 是 |  |
@@ -1217,6 +1221,40 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 - 錯誤：`400`、`401`、`403`
 
+### GET /admin/analytics/cache
+
+語意快取的解答評分。
+
+列出被快取引用過的解答，分數最低的在前，方便找出常配對錯的解答。
+加分：機器人回覆後 10 分鐘內發問者標記已解決且沒有別人回答，或採納機器人的回答。
+扣分：發問者對機器人的回答按倒讚，或採納別人的回答。
+分數每分調整比對門檻 0.01（最多放寬 0.02、最多收緊 0.05），`score` 降到 -3 就不再被引用。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `limit` | query | integer |  | 最小 1，最大 50，預設 `20` |
+
+**回應**
+
+- `200`：OK；`data` 是 object[]
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `source_answer_id` | string | 是 |  |
+| `source_question_id` | string | 是 |  |
+| `question_title` | string \| null | 是 | 來源已被刪除時為 null |
+| `answer_body` | string \| null | 是 | 來源已被刪除時為 null |
+| `score` | integer | 是 |  |
+| `positive_count` | integer | 是 |  |
+| `negative_count` | integer | 是 |  |
+| `reply_count` | integer | 是 |  |
+| `blocked` | boolean | 是 |  |
+| `updated_at` | string（時間） | 是 |  |
+
+- 錯誤：`401`、`403`
+
 ### GET /admin/audit-log
 
 稽核紀錄。
@@ -1535,7 +1573,7 @@ BCP 47 語言標籤
 | `body` | string |  | 最長 5000 字 |
 | `media_ids` | string[] |  | 最多 5 項 |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
-| `tags` | string[] |  | 選填的自訂標籤，和 `category` 並存。每個 1 到 20 字。最多 5 項 |
+| `tags` | string[] |  | 選填的手動標籤，每個 1 到 20 字。固定標籤由後端決定，送了也會被略過 |
 | `category` | [Category](#category) |  | 選填。未填時由分類器判斷，信心不足或沒有文字時為 `uncategorized` |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `context` | [QuestionContext](#questioncontext) \| null |  |  |
@@ -1550,8 +1588,9 @@ BCP 47 語言標籤
 | `id` | string | 是 |  |
 | `status` | [QuestionStatus](#questionstatus) | 是 |  |
 | `title` | string \| null | 是 | 內容待個資確認時為 null |
-| `category` | [Category](#category) | 是 |  |
-| `tags` | string[] | 是 |  |
+| `category` | [Category](#category) | 是 | 即將移除，請改用 `tags` 和 `system_tag` |
+| `tags` | string[] | 是 | 第一個一定是固定標籤，後面是手動標籤。前端全部當標籤顯示即可 |
+| `system_tag` | string | 是 | 後端決定的固定標籤，不可手動移除 |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |
@@ -1574,8 +1613,9 @@ BCP 47 語言標籤
 | `id` | string | 是 |  |
 | `status` | [QuestionStatus](#questionstatus) | 是 |  |
 | `title` | string \| null | 是 | 內容待個資確認時為 null |
-| `category` | [Category](#category) | 是 |  |
-| `tags` | string[] | 是 |  |
+| `category` | [Category](#category) | 是 | 即將移除，請改用 `tags` 和 `system_tag` |
+| `tags` | string[] | 是 | 第一個一定是固定標籤，後面是手動標籤。前端全部當標籤顯示即可 |
+| `system_tag` | string | 是 | 後端決定的固定標籤，不可手動移除 |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |
@@ -1616,7 +1656,7 @@ BCP 47 語言標籤
 | `media` | [Media](#media)[] | 是 |  |
 | `language` | [LanguageTag](#languagetag) |  |  |
 | `is_accepted` | boolean | 是 |  |
-| `cached_from` | object \| null |  | 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答 |
+| `cached_from` | object \| null |  | 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答。建議提供「解決了」和倒讚按鈕，這些反應會影響快取評分 |
 | `votes` | [VoteSummary](#votesummary) | 是 |  |
 | `hidden_parts` | [HiddenPart](#hiddenpart)[] | 是 |  |
 | `created_at` | string（時間） | 是 |  |

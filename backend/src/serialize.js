@@ -1,4 +1,5 @@
 import { distanceM, publicDistanceM } from './geo.js';
+import { systemTagOf } from './tags.js';
 
 export const publicUser = (row) => ({ id: row.id, nickname: row.nickname, points: row.points, role: row.role });
 
@@ -14,7 +15,7 @@ export const meUser = (row) => ({
 export function createSerializers({ db, config, signatures }) {
   const userById = db.prepare('SELECT * FROM users WHERE id = ?');
   const questionById = db.prepare('SELECT * FROM questions WHERE id = ?');
-  const questionTags = db.prepare('SELECT tag FROM question_tags WHERE question_id = ? ORDER BY position');
+  const questionTags = db.prepare('SELECT tag FROM question_tags WHERE question_id = ? ORDER BY is_system DESC, position');
   const questionMedia = db.prepare('SELECT * FROM media WHERE question_id = ? ORDER BY position');
   const answerMedia = db.prepare('SELECT * FROM media WHERE answer_id = ? ORDER BY position');
   const myVote = db.prepare('SELECT value FROM votes WHERE answer_id = ? AND user_id = ?');
@@ -84,6 +85,7 @@ export function createSerializers({ db, config, signatures }) {
       title: seen.hideTitle || (seen.hideBody && row.title_is_auto) ? null : row.title,
       category: row.category,
       tags: questionTags.all(row.id).map((t) => t.tag),
+      system_tag: systemTagOf(row.category),
       language: row.language,
       assistance_mode: row.assistance_mode,
       location_sharing: row.location_sharing,

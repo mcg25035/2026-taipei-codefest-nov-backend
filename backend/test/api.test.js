@@ -1357,12 +1357,13 @@ describe('自訂標籤', () => {
   const searchQ = async (s, user, query) => (await s.call('GET', '/questions', { token: user.token, query })).body.data.map((q) => q.id);
   const searchTags = async (s, user, q) => (await s.call('GET', '/tags', { token: user.token, query: { q } })).body.data.map((t) => t.tag);
 
-  test('發問可帶標籤，和分類並存；會清理、去重並驗證', async () => withServer(async (s) => {
+  test('發問可帶手動標籤，固定標籤排第一；會清理、去重並驗證', async () => withServer(async (s) => {
     const user = await s.login();
     const q = await create(s, user, ['#詐騙', ' 電話  詐騙 ', '詐騙', 'ＡＴＭ'], { category: 'scam_check' });
-    assert.deepEqual(q.tags, ['詐騙', '電話 詐騙', 'ATM']);
+    assert.deepEqual(q.tags, ['疑似詐騙', '詐騙', '電話 詐騙', 'ATM']);
+    assert.equal(q.system_tag, '疑似詐騙');
     assert.equal(q.category, 'scam_check');
-    assert.deepEqual((await create(s, user, undefined)).tags, []);
+    assert.deepEqual((await create(s, user, undefined)).tags, ['公文與合約']);
     const bad = (tags) => s.call('POST', '/questions', { token: user.token, body: s.question({ tags }) });
     assert.equal((await bad(['a', 'b', 'c', 'd', 'e', 'f'])).status, 400);
     assert.equal((await bad(['字'.repeat(21)])).status, 400);
@@ -1419,8 +1420,8 @@ describe('自訂標籤', () => {
     assert.deepEqual(fuzzy.body.data.map((t) => [t.tag, t.question_count]), [['詐騙', 2], ['電話詐騙', 1]]);
     assert.equal(fuzzy.body.data[0].score, 1);
     assert.deepEqual(await searchTags(s, user, '不存在'), []);
-    const popular = await s.call('GET', '/tags', { token: user.token, query: { limit: '1' } });
-    assert.deepEqual(popular.body.data, [{ tag: '詐騙', question_count: 2, score: 1 }]);
+    const popular = await s.call('GET', '/tags', { token: user.token, query: { limit: '2' } });
+    assert.deepEqual(popular.body.data, [{ tag: '公文與合約', question_count: 3, score: 1 }, { tag: '詐騙', question_count: 2, score: 1 }]);
     assert.equal((await s.call('GET', '/tags', { query: { q: '詐騙' } })).status, 401);
     assert.equal((await s.call('GET', '/tags', { token: user.token, query: { q: '  ' } })).status, 400);
   }));
@@ -1434,10 +1435,10 @@ describe('自訂標籤', () => {
 
     const added = await put(volunteer, ['詐騙', '假檢察官']);
     assert.equal(added.status, 200, added.raw);
-    assert.deepEqual(added.body.data.tags, ['詐騙', '假檢察官']);
+    assert.deepEqual(added.body.data.tags, ['公文與合約', '詐騙', '假檢察官']);
     assert.equal((await put(volunteer, ['假檢察官'])).status, 403);
-    assert.deepEqual((await put(asker, ['假檢察官'])).body.data.tags, ['假檢察官']);
-    assert.deepEqual((await put(asker, [])).body.data.tags, []);
+    assert.deepEqual((await put(asker, ['假檢察官'])).body.data.tags, ['公文與合約', '假檢察官']);
+    assert.deepEqual((await put(asker, [])).body.data.tags, ['公文與合約']);
     s.server.db.prepare('UPDATE users SET trust_score = -11 WHERE id = ?').run(low.user.id);
     assert.equal((await put(low, ['亂標'])).status, 403);
     assert.equal((await s.call('PUT', '/questions/{question_id}/tags', { token: asker.token, params: { question_id: q.id }, body: {} })).status, 400);
@@ -1625,7 +1626,7 @@ describe('身份與管理員', () => {
     const q = await create(s, asker, { category: 'other', tags: ['舊標籤'], body: '電話0912' });
     const id = { question_id: q.id };
     assert.equal((await s.call('PUT', '/questions/{question_id}/category', { token: admin.token, params: id, body: { category: 'uncategorized' } })).body.data.category, 'uncategorized');
-    assert.deepEqual((await s.call('PUT', '/questions/{question_id}/tags', { token: admin.token, params: id, body: { tags: ['新標籤'] } })).body.data.tags, ['新標籤']);
+    assert.deepEqual((await s.call('PUT', '/questions/{question_id}/tags', { token: admin.token, params: id, body: { tags: ['新標籤'] } })).body.data.tags, ['未分類', '新標籤']);
 
     const report = await s.call('POST', '/pii-reports', { token: reporter.token, body: { target_type: 'question', target_id: q.id, text_ranges: [{ start: 2, end: 6 }] } });
     const hidden = await s.call('GET', '/questions/{question_id}', { token: reporter.token, params: id });
@@ -1896,5 +1897,261 @@ describe('語意快取', () => {
     const user = await t.login();
     const q = await ask(user);
     assert.equal(q.answer_count, 0);
+  });
+});
+
+describe('語意快取評分', () => {
+  const unit = (s) => [s, Math.sqrt(1 - s * s)];
+  const VECTORS = { 來源問題: [1, 0], 非常相似: unit(0.95), 差一點: unit(0.87), 剛好過: unit(0.89) };
+  const withServer = async (run, extra = {}) => {
+    const s = await startTestServer({
+      adminTownpassIds: ['root'],
+      semanticCacheThreshold: 0.88,
+      embedderOverride: { embed: async (text) => VECTORS[text] ?? [0, 1] },
+      ...extra,
+    });
+    try { await run(s); } finally { await s.stop(); }
+  };
+  const ask4 = async (s, user, body) => {
+    const res = await s.call('POST', '/questions', { token: user.token, body: s.question({ body }) });
+    await s.server.semanticCache.idle();
+    return res.body.data;
+  };
+  const answers = async (s, user, id) => (await s.call('GET', '/questions/{question_id}/answers', { token: user.token, params: { question_id: id } })).body.data;
+  const setup = async (s) => {
+    const asker = await s.login();
+    const helper = await s.login();
+    const q = await ask4(s, asker, '來源問題');
+    const res = await s.call('POST', '/questions/{question_id}/answers', { token: helper.token, params: { question_id: q.id }, body: { body: '原始解答' } });
+    await s.call('POST', '/answers/{answer_id}/accept', { token: asker.token, params: { answer_id: res.body.data.id } });
+    return { helper, source: res.body.data };
+  };
+  const scoreOf = (s, id) => s.server.db.prepare('SELECT * FROM cache_scores WHERE source_answer_id = ?').get(id) ?? { score: 0, positive_count: 0, negative_count: 0 };
+  // 問一題，並回傳機器人的回答。
+  const hit = async (s, text = '非常相似') => {
+    const user = await s.login();
+    const q = await ask4(s, user, text);
+    return { user, q, bot: (await answers(s, user, q.id))[0] };
+  };
+  const resolve = (s, user, id) => s.call('POST', '/questions/{question_id}/resolve', { token: user.token, params: { question_id: id } });
+  const vote = (s, user, id, value) => s.call('PUT', '/answers/{answer_id}/vote', { token: user.token, params: { answer_id: id }, body: { value } });
+  const accept = (s, user, id) => s.call('POST', '/answers/{answer_id}/accept', { token: user.token, params: { answer_id: id } });
+
+  test('回覆後馬上標記已解決會加分，重複不會多算', async () => withServer(async (s) => {
+    const { source } = await setup(s);
+    const { user, q } = await hit(s);
+    assert.equal((await resolve(s, user, q.id)).status, 200);
+    assert.equal(scoreOf(s, source.id).score, 1);
+    assert.equal(scoreOf(s, source.id).positive_count, 1);
+    await s.server.semanticCache.questionResolved(q);
+    assert.equal(scoreOf(s, source.id).score, 1);
+  }));
+
+  test('超過時間、有人回答過或管理員代為標記，都不加分', async () => {
+    await withServer(async (s) => {
+      const { source } = await setup(s);
+      const { user, q } = await hit(s);
+      await resolve(s, user, q.id);
+      assert.equal(scoreOf(s, source.id).score, 0, '超過時間窗');
+    }, { cacheResolveWindowMs: -1 });
+    await withServer(async (s) => {
+      const { source, helper } = await setup(s);
+      const { user, q } = await hit(s);
+      await s.call('POST', '/questions/{question_id}/answers', { token: helper.token, params: { question_id: q.id }, body: { body: '真人回答' } });
+      await resolve(s, user, q.id);
+      assert.equal(scoreOf(s, source.id).score, 0, '有人回答過');
+      const root = (await s.call('POST', '/sessions', { body: { townpass_user_id: 'root' } })).body.data;
+      const second = await hit(s);
+      await resolve(s, root, second.q.id);
+      assert.equal(scoreOf(s, source.id).score, 0, '管理員代為標記');
+    });
+  });
+
+  test('採納機器人加分；採納別人的回答扣分', async () => withServer(async (s) => {
+    const { source, helper } = await setup(s);
+    const first = await hit(s);
+    await accept(s, first.user, first.bot.id);
+    assert.equal(scoreOf(s, source.id).score, 1);
+    const second = await hit(s);
+    const human = await s.call('POST', '/questions/{question_id}/answers', { token: helper.token, params: { question_id: second.q.id }, body: { body: '真人解答' } });
+    await accept(s, second.user, human.body.data.id);
+    const score = scoreOf(s, source.id);
+    assert.deepEqual([score.score, score.positive_count, score.negative_count], [0, 1, 1]);
+  }));
+
+  test('只有發問者的倒讚算數；收回或改成正讚會還原', async () => withServer(async (s) => {
+    const { source, helper } = await setup(s);
+    const { user, bot } = await hit(s);
+    await vote(s, helper, bot.id, -1);
+    assert.equal(scoreOf(s, source.id).score, 0, '別人的倒讚不算');
+    await vote(s, user, bot.id, -1);
+    assert.equal(scoreOf(s, source.id).score, -1);
+    await vote(s, user, bot.id, -1);
+    assert.equal(scoreOf(s, source.id).score, -1, '重複不多扣');
+    await vote(s, user, bot.id, 1);
+    assert.equal(scoreOf(s, source.id).score, 0);
+    await vote(s, user, bot.id, -1);
+    assert.equal((await s.call('DELETE', '/answers/{answer_id}/vote', { token: user.token, params: { answer_id: bot.id } })).status, 200);
+    const score = scoreOf(s, source.id);
+    assert.deepEqual([score.score, score.negative_count], [0, 0]);
+  }));
+
+  test('先按倒讚再標記已解決，不會變成加分', async () => withServer(async (s) => {
+    const { source } = await setup(s);
+    const { user, q, bot } = await hit(s);
+    await vote(s, user, bot.id, -1);
+    await resolve(s, user, q.id);
+    assert.equal(scoreOf(s, source.id).score, -1);
+  }));
+
+  test('分數會影響命中：加分讓差一點的命中，扣分擋掉原本會命中的，-3 分不再引用', async () => {
+    await withServer(async (s) => {
+      await setup(s);
+      assert.equal((await hit(s, '差一點')).bot, undefined, '0.87 原本不到門檻');
+      const first = await hit(s);
+      await resolve(s, first.user, first.q.id);
+      assert.ok((await hit(s, '差一點')).bot, '加 1 分後命中');
+    });
+    await withServer(async (s) => {
+      await setup(s);
+      assert.ok((await hit(s, '剛好過')).bot, '0.89 原本會命中');
+      const first = await hit(s);
+      await vote(s, first.user, first.bot.id, -1);
+      assert.equal((await hit(s, '剛好過')).bot, undefined, '扣 1 分後不命中');
+      const second = await hit(s);
+      await vote(s, second.user, second.bot.id, -1);
+      const third = await hit(s);
+      await vote(s, third.user, third.bot.id, -1);
+      assert.equal((await hit(s)).bot, undefined, '-3 分後連 0.95 也不引用');
+    });
+  });
+
+  test('機器人的回答被採納後不會變成新來源，前綴不會疊加', async () => withServer(async (s) => {
+    const { source } = await setup(s);
+    s.server.db.prepare('INSERT INTO cache_scores (source_answer_id, source_question_id, score, updated_at) VALUES (?, ?, ?, ?)').run(source.id, source.question_id, -3, new Date().toISOString());
+    const blocked = await hit(s);
+    assert.equal(blocked.bot, undefined);
+    s.server.db.prepare('UPDATE cache_scores SET score = 0').run();
+    const first = await hit(s);
+    await accept(s, first.user, first.bot.id);
+    const second = await hit(s);
+    assert.equal(second.bot.cached_from.answer_id, source.id);
+    assert.equal(second.bot.body.match(/之前有人問過/g).length, 1);
+  }));
+
+  test('管理員可查看評分，一般使用者不行', async () => withServer(async (s) => {
+    const { source, helper } = await setup(s);
+    const { user, bot } = await hit(s);
+    await vote(s, user, bot.id, -1);
+    const root = (await s.call('POST', '/sessions', { body: { townpass_user_id: 'root' } })).body.data;
+    const res = await s.call('GET', '/admin/analytics/cache', { token: root.token });
+    assert.equal(res.status, 200, res.raw);
+    assert.equal(res.body.data[0].source_answer_id, source.id);
+    assert.equal(res.body.data[0].score, -1);
+    assert.equal(res.body.data[0].answer_body, '原始解答');
+    assert.equal(res.body.data[0].reply_count, 1);
+    assert.equal(res.body.data[0].blocked, false);
+    assert.equal((await s.call('GET', '/admin/analytics/cache', { token: helper.token })).status, 403);
+  }));
+});
+
+describe('分類和標籤合併', () => {
+  const withServer = async (run) => {
+    const s = await startTestServer();
+    try { await run(s); } finally { await s.stop(); }
+  };
+  const post = async (s, user, extra) => {
+    const body = s.question(extra);
+    if (!('category' in extra)) delete body.category;
+    const res = await s.call('POST', '/questions', { token: user.token, body });
+    assert.equal(res.status, 201, res.raw);
+    return res.body.data;
+  };
+  const put = (s, user, id, tags) => s.call('PUT', '/questions/{question_id}/tags', { token: user.token, params: { question_id: id }, body: { tags } });
+
+  test('後端判定固定標籤；沒把握時是未分類；列表和詳情都帶', async () => withServer(async (s) => {
+    const user = await s.login();
+    const scam = await post(s, user, { body: '有人打電話說我涉及洗錢要我匯款', tags: ['假檢察官'] });
+    assert.deepEqual(scam.tags, ['疑似詐騙', '假檢察官']);
+    assert.equal(scam.system_tag, '疑似詐騙');
+    const unknown = await post(s, user, { body: '🤔🤔🤔' });
+    assert.deepEqual(unknown.tags, ['未分類']);
+    const listed = (await s.call('GET', '/questions', { token: user.token, query: { author: 'me' } })).body.data.find((q) => q.id === scam.id);
+    assert.deepEqual(listed.tags, ['疑似詐騙', '假檢察官']);
+    assert.equal(listed.system_tag, '疑似詐騙');
+  }));
+
+  test('把回傳的 tags 整包送回不會出錯，也不會多一個；固定標籤不算進上限', async () => withServer(async (s) => {
+    const user = await s.login();
+    const q = await post(s, user, { body: '資料', category: 'other', tags: ['甲', '乙', '丙', '丁', '戊'] });
+    assert.equal(q.tags.length, 6);
+    const again = await put(s, user, q.id, q.tags);
+    assert.equal(again.status, 200, again.raw);
+    assert.deepEqual(again.body.data.tags, q.tags);
+  }));
+
+  test('手動打固定標籤的名稱會被略過，不能改掉或移除固定標籤', async () => withServer(async (s) => {
+    const user = await s.login();
+    const q = await post(s, user, { body: '資料', category: 'other', tags: ['疑似詐騙', '手動'] });
+    assert.deepEqual(q.tags, ['其他', '手動']);
+    assert.equal(q.system_tag, '其他');
+    const res = await put(s, user, q.id, []);
+    assert.deepEqual(res.body.data.tags, ['其他']);
+    assert.equal(res.body.data.system_tag, '其他');
+  }));
+
+  test('志工只動手動標籤時，不算移除固定標籤；舊 API 改分類會同步 tags', async () => withServer(async (s) => {
+    const asker = await s.login();
+    const volunteer = await s.login();
+    const q = await post(s, asker, { body: '🤔🤔🤔', tags: ['原有'] });
+    assert.equal((await put(s, volunteer, q.id, ['原有', '新增'])).status, 200);
+    const res = await s.call('PUT', '/questions/{question_id}/category', { token: volunteer.token, params: { question_id: q.id }, body: { category: 'scam_check' } });
+    assert.deepEqual(res.body.data.tags, ['疑似詐騙', '原有', '新增']);
+    assert.equal(res.body.data.system_tag, '疑似詐騙');
+    assert.equal(s.server.db.prepare("SELECT COUNT(*) AS n FROM question_tags WHERE question_id = ? AND is_system = 1").get(q.id).n, 1);
+  }));
+
+  test('固定標籤可以被搜尋；舊的 category 參數仍可用', async () => withServer(async (s) => {
+    const user = await s.login();
+    const q = await post(s, user, { body: '資料', category: 'scam_check' });
+    const ids = async (query) => (await s.call('GET', '/questions', { token: user.token, query })).body.data.map((x) => x.id);
+    assert.deepEqual(await ids({ tag_q: '詐騙' }), [q.id]);
+    assert.deepEqual(await ids({ tag: '疑似詐騙' }), [q.id]);
+    assert.deepEqual(await ids({ category: 'scam_check' }), [q.id]);
+    const tags = await s.call('GET', '/tags', { token: user.token, query: { q: '詐騙' } });
+    assert.deepEqual(tags.body.data.map((t) => t.tag), ['疑似詐騙']);
+  }));
+
+  test('舊資料庫升級時補上固定標籤，同名手動標籤轉成固定標籤，重開不會重複', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codefest-tags-'));
+    try {
+      const old = new Database(path.join(dir, 'app.db'));
+      old.exec(`
+        CREATE TABLE users (id TEXT PRIMARY KEY, townpass_user_id TEXT NOT NULL UNIQUE, nickname TEXT NOT NULL, points INTEGER NOT NULL DEFAULT 0,
+          trust_score INTEGER NOT NULL DEFAULT 0, languages TEXT NOT NULL, nearby_notifications_enabled INTEGER NOT NULL DEFAULT 1, nearby_radius_m INTEGER NOT NULL DEFAULT 1000,
+          location_sharing TEXT NOT NULL DEFAULT 'approximate', last_lat REAL, last_lng REAL, location_updated_at TEXT, last_nearby_notified_at TEXT, created_at TEXT NOT NULL);
+        CREATE TABLE questions (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', title TEXT NOT NULL, title_is_auto INTEGER NOT NULL DEFAULT 0, body TEXT,
+          category TEXT NOT NULL, language TEXT NOT NULL, assistance_mode TEXT NOT NULL, location_sharing TEXT NOT NULL, context TEXT, service_id TEXT, approx_lat REAL, approx_lng REAL,
+          exact_lat REAL, exact_lng REAL, answer_count INTEGER NOT NULL DEFAULT 0, accepted_answer_id TEXT, client_request_id TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE (author_id, client_request_id));
+        CREATE TABLE question_tags (question_id TEXT NOT NULL, tag_key TEXT NOT NULL, tag TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY (question_id, tag_key));
+        INSERT INTO users (id, townpass_user_id, nickname, languages, created_at) VALUES ('u', 'u', 'u', '[]', '2026-01-01');
+        INSERT INTO questions (id, author_id, title, category, language, assistance_mode, location_sharing, client_request_id, created_at) VALUES
+          ('q1', 'u', 't', 'scam_check', 'zh-TW', 'online', 'off', 'a', '2026-01-01'),
+          ('q2', 'u', 't', 'other', 'zh-TW', 'online', 'off', 'b', '2026-01-01');
+        INSERT INTO question_tags VALUES ('q1', '手動', '手動', 0), ('q2', '其他', '其他', 0);
+      `);
+      old.close();
+      for (let i = 0; i < 2; i++) openDatabase(dir).close();
+      const db = openDatabase(dir);
+      const rows = db.prepare('SELECT question_id, tag, is_system FROM question_tags ORDER BY question_id, is_system DESC').all().map((r) => ({ ...r }));
+      assert.deepEqual(rows, [
+        { question_id: 'q1', tag: '疑似詐騙', is_system: 1 },
+        { question_id: 'q1', tag: '手動', is_system: 0 },
+        { question_id: 'q2', tag: '其他', is_system: 1 },
+      ]);
+      db.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

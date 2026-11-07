@@ -39,8 +39,8 @@ curl -X POST $BASE/questions \
 - **分頁：** 列表回傳 `next_cursor`，把它放進下一次的 `cursor`；值為 `null` 表示沒有下一頁。參數 `limit` 可填 1 到 50，預設 20。
 - **防重送：** 網路不穩時，用相同的 `client_request_id` 重送，不會重複建立內容。
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
-- **標籤：** 除了分類，問題可帶最多 5 個自訂標籤。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
-- **語意快取：** 發問後可能很快收到機器人的回答，`author.role` 是 `bot`，`cached_from` 有值。收到 `answers.changed` 時重抓就會看到，介面要標示這是舊解答。
+- **標籤：** `tags` 第一個是後端判定的固定標籤（`system_tag`），後面最多 5 個手動標籤，前端全部當標籤顯示，只有固定標籤不能讓人刪除。`category` 即將移除。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
+- **語意快取：** 發問後可能很快收到機器人的回答，`author.role` 是 `bot`，`cached_from` 有值。收到 `answers.changed` 時重抓就會看到，介面要標示這是舊解答。發問者按「已解決」、採納或倒讚，會調整這則解答之後被引用的機會。
 - **媒體：** 先呼叫 `POST /media` 取得 `id`，再放進問題或回答的 `media_ids`。超過 24 小時未使用的檔案會被刪除。
 - **不會回傳的資料：** 倒讚數只留在後端；可信度評分只有管理員 API 看得到。
 - **身份：** 使用者資料都有 `role`：`user`、`admin`、`bot`。`bot` 的權限和一般使用者相同，前端要標示它是機器人。

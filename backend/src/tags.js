@@ -1,4 +1,5 @@
 import { validationError } from './errors.js';
+import { CATEGORIES } from './util.js';
 
 const MAX_TAGS = 5;
 const MAX_LENGTH = 20;
@@ -12,11 +13,13 @@ export const tagKey = (text) => String(text)
   .replaceAll('臺', '台')
   .replace(/[\s_\-·#]+/g, '');
 
+// 固定標籤就是 8 個分類的中文名稱，由後端決定，不接受手動新增或移除。
+export const systemTagOf = (category) => CATEGORIES[category];
+const SYSTEM_KEYS = new Set(Object.values(CATEGORIES).map(tagKey));
+
 export function parseTags(value) {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.length > MAX_TAGS) {
-    throw validationError(`tags 必須是最多 ${MAX_TAGS} 個標籤的陣列`, { field: 'tags' });
-  }
+  if (!Array.isArray(value)) throw validationError('tags 必須是陣列', { field: 'tags' });
   const byKey = new Map();
   for (const raw of value) {
     const invalid = () => validationError(`標籤必須是 1 到 ${MAX_LENGTH} 字的文字或數字`, { field: 'tags' });
@@ -24,8 +27,10 @@ export function parseTags(value) {
     const tag = raw.normalize('NFKC').replace(/^#+/, '').trim().replace(/\s+/g, ' ');
     const key = tagKey(tag);
     if (!key || [...tag].length > MAX_LENGTH || !ALLOWED.test(tag)) throw invalid();
-    if (!byKey.has(key)) byKey.set(key, tag);
+    // 前端可能把收到的 tags 整包送回來，固定標籤直接略過，不算進上限。
+    if (!SYSTEM_KEYS.has(key) && !byKey.has(key)) byKey.set(key, tag);
   }
+  if (byKey.size > MAX_TAGS) throw validationError(`手動標籤最多 ${MAX_TAGS} 個`, { field: 'tags' });
   return [...byKey].map(([key, tag]) => ({ key, tag }));
 }
 
