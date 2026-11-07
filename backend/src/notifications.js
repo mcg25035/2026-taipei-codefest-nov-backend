@@ -12,7 +12,7 @@ export const serializeNotification = (row) => ({
   created_at: row.created_at,
 });
 
-export function createNotifier({ db, config, getRealtime }) {
+export function createNotifier({ db, config, getRealtime, push }) {
   const insert = db.prepare(`
     INSERT OR IGNORE INTO notifications (id, user_id, type, title, body, question_id, exact_lat, exact_lng, created_at)
     VALUES (@id, @user_id, @type, @title, @body, @question_id, @exact_lat, @exact_lng, @created_at)
@@ -29,6 +29,7 @@ export function createNotifier({ db, config, getRealtime }) {
     if (!changes) return null;
     const row = select.get(id);
     getRealtime().deliverNotification(row);
+    push.notificationCreated(row);
     return row;
   };
 

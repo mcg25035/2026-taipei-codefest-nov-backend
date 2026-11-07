@@ -25,7 +25,7 @@
 | 位置分享 | 三個等級：完全關閉、模糊位置、具體位置 |
 | 即時更新 | 資料全走 REST；Socket.IO 只通知前端重抓，個人通知走 SSE |
 | 平台 | 只做 Android，不做 iOS 和 APNs |
-| 通知管道 | SSE、前景服務、背景輪詢，不使用 Firebase |
+| 通知管道 | App 在背景或關閉時用 FCM 推播；App 開啟中用 SSE；heartbeat 補抓 |
 
 ### 暫定預設值
 
@@ -60,7 +60,9 @@
 ```text
 Vue WebView ──REST / Socket.IO / SSE──┐
                                       ├── 反向代理（自行處理）── Express API ── SQLite、媒體檔
-Flutter App ──heartbeat / SSE─────────┘
+Flutter App ──heartbeat───────────────┘                               │
+                                                                 FCM HTTP v1
+城市通 App <──────────────────── FCM <────────────────────────────────┘
 ```
 
 後端用 Express + SQLite，範圍維持單一服務，只提供 HTTP；HTTPS 與反向代理由部署方自行處理。Socket.IO 走同一個 Express 服務；SSE 路由要關閉反向代理緩衝。
@@ -123,11 +125,18 @@ claimed ──接案者抵達──> arrived ──發問者確認──> comple
 
 | 情況 | 管道 |
 |---|---|
-| App 開啟中 | `GET /notifications/stream`（SSE） |
-| App 在背景或關閉 | 前景服務維持 `GET /notifications/stream`，由 App 顯示本機通知 |
-| 連線中斷時的備援 | 定時呼叫 `POST /me/heartbeat` 取回未送達的通知 |
+| App 在背景或關閉 | FCM 推播，由系統顯示；點擊後城市通開啟 `data.url` |
+| App 開啟中 | FCM 推播由城市通顯示成本機通知；頁面用 `GET /notifications/stream`（SSE）即時更新畫面 |
+| 推播失敗或未啟用時的備援 | 定時呼叫 `POST /me/heartbeat` 取回未送達的通知 |
 
-前景服務需要常駐通知，部分手機品牌仍可能結束它，所以要保留 heartbeat 當備援。Demo 前要用實機測試。
+每則通知都會推播到使用者所有已註冊的裝置，規則參考城市通的 FCM 規格：
+
+1. 每次載入頁面或登入後，網頁呼叫城市通的 `push_token`，再用 `PUT /push-tokens/{token}` 上傳。token 會變，App 也不會主動通知網頁，所以每次都要上傳；`push_token` 回傳 `null` 時跳過。
+2. 使用者由登入 token 判斷，不接受前端傳來的使用者 ID，避免把自己的裝置綁到別人帳號。
+3. 推播的 `notification` 帶通知的 `title` 和 `body`；`data` 的值都是字串：`notification_id`、`type`，有問題時另帶 `question_id` 和 `url`。`url` 預設是 `https://tp2026.ydtw.net/?question={question_id}`，前端要在載入時讀取 `question` 參數並直接開啟該問題；可用 `PUSH_QUESTION_URL` 修改。
+4. 推播內容會出現在鎖定畫面，所以和 SSE 一樣只放固定文字和問題標題；標題待個資確認時改用通用文字。
+
+**避免重複通知：** 推播已經會顯示通知，網頁收到 SSE 或 heartbeat 的通知時只更新畫面，不要再呼叫 `notify`。
 
 城市通的 `notify` 會比對「已訂閱」和「已取消訂閱」字樣來改動訂閱清單，通知文字要避開這些開頭。
 
@@ -177,7 +186,7 @@ event: notification.created
 data: {"id":"n_1","type":"new_answer","title":"有人回答了你的問題", ... }
 ```
 
-通知要帶標題和內容，Android 前景服務才能直接顯示。斷線後用 `GET /notifications` 補抓。
+斷線後用 `GET /notifications` 補抓。
 
 ## 情境帶入
 
@@ -217,7 +226,7 @@ data: {"id":"n_1","type":"new_answer","title":"有人回答了你的問題", ...
 
 ## 實作狀態
 
-規格內的 32 支 API 都已實作，進度與限制見 [`backend/README.md`](../../backend/README.md)。
+規格內的 34 支 API 都已實作，進度與限制見 [`backend/README.md`](../../backend/README.md)。
 
 ## 不在範圍內
 

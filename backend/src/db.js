@@ -145,6 +145,13 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, created_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  platform TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_nearby_once ON notifications (user_id, question_id)
   WHERE type = 'nearby_question';
 `;

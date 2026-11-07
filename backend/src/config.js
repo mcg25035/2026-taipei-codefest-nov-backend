@@ -1,3 +1,17 @@
+import fs from 'node:fs';
+
+// 服務帳戶金鑰可用檔案路徑或整份 JSON 傳入；都沒有時停用 FCM 推播。
+function loadServiceAccount(env) {
+  const file = env.FCM_SERVICE_ACCOUNT_FILE?.trim();
+  const raw = env.FCM_SERVICE_ACCOUNT_JSON?.trim() || (file && fs.readFileSync(file, 'utf8'));
+  if (!raw) return null;
+  const account = JSON.parse(raw);
+  for (const field of ['project_id', 'client_email', 'private_key']) {
+    if (!account[field]) throw new Error(`FCM 服務帳戶金鑰缺少 ${field}`);
+  }
+  return account;
+}
+
 export function loadConfig(overrides = {}) {
   const env = process.env;
   const corsOrigin = env.CORS_ORIGIN?.trim() || '*';
@@ -9,6 +23,19 @@ export function loadConfig(overrides = {}) {
     corsOrigin: corsOrigin === '*' ? '*' : corsOrigin.split(',').map((s) => s.trim()),
     sessionTtlDays: 30,
     heartbeatSeconds: 60,
+    push: {
+      serviceAccount: loadServiceAccount(env),
+      channelId: env.FCM_CHANNEL_ID?.trim() || 'TownPass android notification id',
+      // 點擊通知後開啟的網址樣板，{question_id} 會被替換；設為空字串時推播不帶 url。
+      questionUrl: env.PUSH_QUESTION_URL === undefined
+        ? 'https://tp2026.ydtw.net/?question={question_id}'
+        : env.PUSH_QUESTION_URL.trim() || null,
+      maxTokensPerUser: 10,
+      maxAttempts: 3,
+      retryBaseMs: 1000,
+    },
+    // 測試用：取代 FCM 傳輸層，介面同 createFcmTransport。
+    pushTransport: null,
     ssePingMs: 25_000,
     points: { answerAccepted: 10, assistCompleted: 30 },
     trust: { answerAccepted: 5, assistCompleted: 10, upvote: 1, downvote: -2, lowThreshold: -10 },

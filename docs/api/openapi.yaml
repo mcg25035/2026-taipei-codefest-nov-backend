@@ -27,6 +27,8 @@ tags:
     description: 個資標記與遮蔽
   - name: Reward
   - name: Notification
+  - name: Push
+    description: FCM 推播裝置註冊
   - name: Realtime
   - name: Meta
 security:
@@ -779,6 +781,44 @@ paths:
           content:
             text/event-stream:
               schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /push-tokens/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        description: 城市通 `push_token` 取得的 FCM token，要用 `encodeURIComponent` 編碼
+        schema: { type: string, maxLength: 4096 }
+    put:
+      tags: [Push]
+      summary: 註冊或更新此裝置的 FCM token
+      description: |
+        以 token 為唯一鍵 upsert，綁定到目前登入的使用者；同一使用者可有多支裝置，最多保留最近 10 個。
+        token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主動通知網頁，
+        所以每次載入頁面或登入後都要呼叫 `push_token` 並重新上傳。`push_token` 回傳 `null` 時不用呼叫。
+      operationId: registerPushToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform]
+              properties:
+                platform: { type: string, enum: [android, ios] }
+      responses:
+        '204': { description: 已註冊 }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Push]
+      summary: 取消此裝置的推播
+      description: 只會刪除屬於自己的 token；token 不存在時一樣回 204。
+      operationId: unregisterPushToken
+      responses:
+        '204': { description: 已取消 }
+        '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
 
   /meta:
