@@ -58,6 +58,15 @@ export function createSerializers({ db, config, signatures }) {
   const isAdmin = (req) => req.user?.role === 'admin';
   const questionVisibility = (req, row) => visibility('question', row.id, row.author_id === req.user?.id || isAdmin(req));
 
+  // context.extra 是各功能自訂的診斷資料（例如問題回報的裝置型號、瀏覽過的頁面），只給發問者本人與管理員；
+  // 其他人只看得到 service、page_route、page_title。
+  const questionContext = (req, row) => {
+    if (!row.context) return null;
+    const { extra, ...context } = JSON.parse(row.context);
+    if (extra !== undefined && (row.author_id === req.user?.id || isAdmin(req))) context.extra = extra;
+    return context;
+  };
+
   const canClaim = (req, row, viewerPoint) => {
     const user = req.user;
     if (row.assistance_mode === 'online' || row.status !== 'open' || row.author_id === user.id) return false;
@@ -79,7 +88,7 @@ export function createSerializers({ db, config, signatures }) {
       assistance_mode: row.assistance_mode,
       location_sharing: row.location_sharing,
       author: publicUser(userById.get(row.author_id)),
-      context: row.context ? JSON.parse(row.context) : null,
+      context: questionContext(req, row),
       area: row.approx_lat === null ? null : {
         approx_lat: row.approx_lat,
         approx_lng: row.approx_lng,

@@ -1522,7 +1522,7 @@ BCP 47 語言標籤
 | `service_name` | string | 是 |  |
 | `page_route` | string |  |  |
 | `page_title` | string |  |  |
-| `extra` | object |  | 由各功能自訂，最大 8 KB。**所有登入者都拿得到，前端不要顯示** |
+| `extra` | object |  | 由各功能自訂，最大 8 KB。只回傳給發問者本人與管理員，其他人收到的 context 不含此欄位。 |
 
 ### CreateQuestionRequest
 

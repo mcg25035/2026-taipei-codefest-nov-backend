@@ -1505,6 +1505,30 @@ describe('身份與管理員', () => {
     assert.equal((await s.call('GET', '/users/{user_id}', { params: { user_id: bot.user.id } })).body.data.role, 'bot');
   }));
 
+  test('情境的 extra 只有發問者與管理員看得到', async () => withServer(async (s, admin, session) => {
+    const asker = await session('reporter');
+    const other = await session('passerby');
+    const context = {
+      service_id: 'townpass-app',
+      service_name: 'Town Pass',
+      page_route: '/main/service',
+      page_title: '服務',
+      extra: { deviceModel: 'SM-A236E', routeHistory: ['/', '/account'] },
+    };
+    const q = await create(s, asker, { context });
+    const view = async (user) => (await s.call('GET', '/questions/{question_id}', { token: user.token, params: { question_id: q.id } })).body.data.context;
+    const listed = async (user) => (await s.call('GET', '/questions', { token: user.token, query: { service_id: 'townpass-app' } })).body.data.find((item) => item.id === q.id).context;
+
+    assert.deepEqual(q.context.extra, context.extra);
+    assert.deepEqual((await view(asker)).extra, context.extra);
+    assert.deepEqual((await view(admin)).extra, context.extra);
+    for (const seen of [await view(other), await listed(other)]) {
+      assert.equal(seen.extra, undefined);
+      assert.equal(seen.page_route, '/main/service');
+      assert.equal(seen.page_title, '服務');
+    }
+  }));
+
   test('非管理員不能用任何管理員 API，也看不到可信度評分', async () => withServer(async (s, admin, session) => {
     const user = await session('normal');
     const q = await create(s, user);
