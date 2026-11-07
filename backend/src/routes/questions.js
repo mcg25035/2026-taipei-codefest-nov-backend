@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { ApiError, forbidden, notFound, validationError } from '../errors.js';
 import { distanceM, snap } from '../geo.js';
+import { matchTagKeys, parseTags, tagKey } from '../tags.js';
 import {
   ASSISTANCE_MODES, CATEGORIES, LOCATION_LEVELS, QUESTION_STATUSES, decodeCursor, encodeCursor, isObject, newId, nowIso,
   optionalString, parseCoordinates, parseLanguage, parseLimit, parseMediaIds, queryNumber, requireBodyObject, requireEnum, requireString,
@@ -52,6 +53,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     VALUES (@id, @author_id, @title, @title_is_auto, @body, @category, @language, @assistance_mode, @location_sharing, @context, @service_id,
       @approx_lat, @approx_lng, @exact_lat, @exact_lng, @client_request_id, @created_at)
   `);
+  const insertTag = db.prepare('INSERT INTO question_tags (question_id, tag_key, tag, position) VALUES (?, ?, ?, ?)');
   const attach = db.prepare(`
     UPDATE media SET question_id = ?, position = ? WHERE id = ? AND owner_id = ? AND question_id IS NULL AND answer_id IS NULL
   `);
@@ -86,6 +88,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       ? autoCategory(`${optionalString(body, 'title', { max: 80 }) ?? ''} ${text ?? ''}`)
       : requireEnum(body.category, Object.keys(CATEGORIES), 'category');
     const language = parseLanguage(body.language);
+    const tags = parseTags(body.tags);
     const customTitle = optionalString(body, 'title', { max: 80 });
     const title = customTitle || (text?.trim() ? firstChars(text.trim(), 30) : '圖片或語音問題');
 
@@ -107,6 +110,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
           throw validationError('media_ids 含有不存在或已被使用的檔案', { field: 'media_ids', media_id: mediaId });
         }
       });
+      tags.forEach(({ key, tag }, position) => insertTag.run(id, key, tag, position));
     });
     create();
 
@@ -115,6 +119,9 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     getRealtime().feedChanged();
     res.status(201).json({ data: serializers.questionDetail(req, row) });
   });
+
+  const allTagKeys = db.prepare('SELECT DISTINCT tag_key FROM question_tags');
+  const tagKeysOf = db.prepare('SELECT tag_key FROM question_tags WHERE question_id = ?');
 
   function parseListQuery(query, user) {
     const scope = query.scope === undefined ? 'global' : requireEnum(query.scope, ['global', 'nearby'], 'scope');
@@ -142,8 +149,25 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
       equals('author_id', user.id);
     }
     if (sort === 'unanswered') where.push('answer_count = 0');
+    if (query.tag !== undefined) {
+      where.push('id IN (SELECT question_id FROM question_tags WHERE tag_key = @exactTag)');
+      params.exactTag = tagKey(query.tag);
+    }
+    let tagScores = null;
+    if (query.tag_q !== undefined) {
+      if (typeof query.tag_q !== 'string' || !tagKey(query.tag_q) || [...query.tag_q].length > 50) {
+        throw validationError('tag_q 必須是 1 到 50 字的文字', { field: 'tag_q' });
+      }
+      tagScores = matchTagKeys(query.tag_q, allTagKeys.all().map((r) => r.tag_key));
+      const keys = [...tagScores.keys()];
+      keys.forEach((key, i) => { params[`fuzzy${i}`] = key; });
+      where.push(keys.length
+        ? `id IN (SELECT question_id FROM question_tags WHERE tag_key IN (${keys.map((_, i) => `@fuzzy${i}`).join(', ')}))`
+        : '0');
+    }
     return {
-      scope, sort, where, params,
+      scope, sort, where, params, tagScores,
+      byRelevance: tagScores !== null && query.sort === undefined && scope === 'global',
       point: hasPoint ? { lat, lng } : null,
       radius: queryNumber(query, 'radius_m', { min: 100, max: 5000, integer: true, fallback: 1000 }),
       limit: parseLimit(query),
@@ -166,6 +190,17 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     return { page, next };
   }
 
+  // 模糊搜尋預設依相似度排序，相同時新的在前。
+  function listByRelevance(q) {
+    const best = (row) => Math.max(0, ...tagKeysOf.all(row.id).map((t) => q.tagScores.get(t.tag_key) ?? 0));
+    const rows = db.prepare(`SELECT * FROM questions ${whereSql(q.where)} ORDER BY created_at DESC, id DESC`).all(q.params)
+      .map((row) => ({ row, score: best(row) }))
+      .sort((a, b) => b.score - a.score);
+    const offset = Number.isInteger(q.cursor?.o) && q.cursor.o >= 0 ? q.cursor.o : 0;
+    const page = rows.slice(offset, offset + q.limit).map(({ row }) => row);
+    return { page, next: offset + q.limit < rows.length ? encodeCursor({ o: offset + q.limit }) : null };
+  }
+
   function listByTime(q) {
     const clauses = [...q.where];
     const params = { ...q.params, limit: q.limit + 1 };
@@ -182,7 +217,8 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
 
   router.get('/questions', (req, res) => {
     const q = parseListQuery(req.query, req.user);
-    const { page, next } = q.scope === 'nearby' || q.sort === 'nearest' ? listByDistance(q) : listByTime(q);
+    const list = q.byRelevance ? listByRelevance : q.scope === 'nearby' || q.sort === 'nearest' ? listByDistance : listByTime;
+    const { page, next } = list(q);
     res.json({ data: page.map((row) => serializers.questionSummary(req, row, q.point)), next_cursor: next });
   });
 
@@ -213,6 +249,29 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     res.json({ data: serializers.questionDetail(req, byId.get(row.id)) });
   });
 
+  const tagsOf = db.prepare('SELECT tag_key FROM question_tags WHERE question_id = ?');
+  const clearTags = db.prepare('DELETE FROM question_tags WHERE question_id = ?');
+
+  // 發問者可以任意修改；其他人只能新增，避免別人的標籤被刪掉，發問者也能移除不想要的標籤。
+  router.put('/questions/:id/tags', (req, res) => {
+    const row = byId.get(req.params.id);
+    if (!row) throw notFound();
+    const tags = parseTags(requireBodyObject(req.body).tags ?? null);
+    if (!Array.isArray(req.body.tags)) throw validationError('缺少 tags', { field: 'tags' });
+    if (row.author_id !== req.user.id) {
+      if (req.user.trust_score < config.trust.lowThreshold) throw forbidden('目前不能編輯標籤');
+      const next = new Set(tags.map((t) => t.key));
+      if (tagsOf.all(row.id).some((t) => !next.has(t.tag_key))) throw forbidden('只有發問者可以移除標籤');
+    }
+    db.transaction(() => {
+      clearTags.run(row.id);
+      tags.forEach(({ key, tag }, position) => insertTag.run(row.id, key, tag, position));
+    })();
+    getRealtime().questionChanged(row.id);
+    getRealtime().feedChanged();
+    res.json({ data: serializers.questionDetail(req, byId.get(row.id)) });
+  });
+
   const updateCategory = db.prepare('UPDATE questions SET category = ? WHERE id = ?');
 
   // 志工只能替未分類的問題分類，避免已分類的問題被亂改；發問者隨時可以改。
@@ -236,6 +295,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     SELECT * FROM media WHERE question_id = @id OR answer_id IN (SELECT id FROM answers WHERE question_id = @id)
   `);
   const deleteRelated = [
+    'DELETE FROM question_tags WHERE question_id = @id',
     'DELETE FROM pii_reports WHERE question_id = @id',
     'DELETE FROM votes WHERE answer_id IN (SELECT id FROM answers WHERE question_id = @id)',
     'DELETE FROM media WHERE question_id = @id OR answer_id IN (SELECT id FROM answers WHERE question_id = @id)',

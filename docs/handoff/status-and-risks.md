@@ -4,7 +4,7 @@
 
 ## 已完成
 
-- 規格內的 37 支 API 和 Socket.IO 訊號，79 個測試通過。
+- 規格內的 39 支 API 和 Socket.IO 訊號，79 個測試通過。
 - 線上環境已透過公開網域驗證：問答、媒體、Socket.IO、SSE、自動分類、`/resolve`。
 - FCM 的認證和發送路徑已用假 token 驗證，且已有一台 Android 註冊 token。
 

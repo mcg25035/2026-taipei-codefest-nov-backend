@@ -17,6 +17,7 @@ backend/
 │  ├─ realtime.js        Socket.IO 訊號與 SSE
 │  ├─ push.js            FCM 發送、重試、清除無效 token
 │  ├─ classifier.js      線上分類
+│  ├─ tags.js            標籤驗證與模糊比對
 │  ├─ rewards.js         徽章
 │  ├─ signatures.js      媒體短效連結
 │  ├─ geo.js             網格與距離

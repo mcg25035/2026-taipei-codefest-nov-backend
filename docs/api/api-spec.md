@@ -1,6 +1,6 @@
 # 後端 API 規格
 
-這份文件列出後端全部 37 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
+這份文件列出後端全部 39 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
 
 - **Base URL：** `https://tpcodefest.mcloudtw.com/api/v1`
 - **平台：** 只支援 Android
@@ -39,6 +39,7 @@ curl -X POST $BASE/questions \
 - **分頁：** 列表回傳 `next_cursor`，把它放進下一次的 `cursor`；值為 `null` 表示沒有下一頁。參數 `limit` 可填 1 到 50，預設 20。
 - **防重送：** 網路不穩時，用相同的 `client_request_id` 重送，不會重複建立內容。
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
+- **標籤：** 除了分類，問題可帶最多 5 個自訂標籤。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
 - **媒體：** 先呼叫 `POST /media` 取得 `id`，再放進問題或回答的 `media_ids`。超過 24 小時未使用的檔案會被刪除。
 - **不會回傳的資料：** 倒讚數和可信度評分只留在後端。
 
@@ -137,6 +138,8 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 | GET | `/questions/{question_id}` | 問題詳情 | 是 |
 | DELETE | `/questions/{question_id}` | 撤回問題 | 是 |
 | POST | `/questions/{question_id}/resolve` | 發問者標記問題已解決 | 是 |
+| PUT | `/questions/{question_id}/tags` | 設定問題的自訂標籤 | 是 |
+| GET | `/tags` | 搜尋標籤 | 是 |
 | PUT | `/questions/{question_id}/category` | 替問題分類 | 是 |
 | GET | `/questions/{question_id}/answers` | 回答列表 | 是 |
 | POST | `/questions/{question_id}/answers` | 回答問題 | 是 |
@@ -327,6 +330,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 `scope=nearby` 或 `sort=nearest` 時必須帶 `lat`、`lng`。
 任務板不是另一個資源，而是此列表依 `reward_points` 與 `can_claim` 呈現的畫面。
+`tag`、`tag_q` 可和其他條件同時使用，例如 `tag_q=詐騙&status=open`。
 `sort=unanswered` 只回傳還沒有回答的問題，由新到舊排序。
 
 **參數**
@@ -339,6 +343,8 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `radius_m` | query | integer |  | 最小 100，最大 5000，預設 `1000` |
 | `status` | query | [QuestionStatus](#questionstatus) |  |  |
 | `category` | query | [Category](#category) |  |  |
+| `tag` | query | string |  | 完全符合這個標籤（不分大小寫、全半形、臺台） |
+| `tag_q` | query | string |  | 模糊搜尋標籤；沒指定 sort 且 scope 為 global 時依相似度排序。最長 50 字 |
 | `language` | query | [LanguageTag](#languagetag) |  |  |
 | `assistance_mode` | query | [AssistanceMode](#assistancemode) |  |  |
 | `service_id` | query | string |  | 只看某個城市通功能的問題 |
@@ -357,6 +363,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `status` | [QuestionStatus](#questionstatus) | 是 |  |
 | `title` | string \| null | 是 | 內容待個資確認時為 null |
 | `category` | [Category](#category) | 是 |  |
+| `tags` | string[] | 是 |  |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |
@@ -394,6 +401,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `body` | string |  | 最長 5000 字 |
 | `media_ids` | string[] |  | 最多 5 項 |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
+| `tags` | string[] |  | 選填的自訂標籤，和 `category` 並存。每個 1 到 20 字。最多 5 項 |
 | `category` | [Category](#category) |  | 選填。未填時由分類器判斷，信心不足或沒有文字時為 `uncategorized` |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `context` | [QuestionContext](#questioncontext) \| null |  |  |
@@ -457,6 +465,57 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 - `200`：OK；`data` 是 [QuestionDetail](#questiondetail)
 - 錯誤：`401`、`403`、`404`、`409`
+
+### PUT /questions/{question_id}/tags
+
+設定問題的自訂標籤。
+
+傳入完整的標籤清單，會取代現有標籤。
+發問者可以新增或移除；其他登入者只能新增，移除別人的標籤回傳 403。低可信度帳號回傳 403。
+最多 5 個，每個 1 到 20 字，只能有文字、數字、空白、`-`、`_`、`·`；開頭的 `#` 會被移除。重複的標籤會合併。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `question_id` | 路徑 | string | 是 |  |
+
+**請求內容**（`application/json`）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `tags` | string[] | 是 | 最多 5 項 |
+
+**回應**
+
+- `200`：OK；`data` 是 [QuestionDetail](#questiondetail)
+- 錯誤：`400`、`401`、`403`、`404`
+
+### GET /tags
+
+搜尋標籤。
+
+有 `q` 時模糊比對並依相似度排序，能接受部分符合、詞序不同和打錯字；沒有 `q` 時回傳最多人使用的標籤。
+比對時不分大小寫、全半形和臺台，也忽略空白和分隔符號。可用於輸入標籤時的自動完成。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `q` | query | string |  | 最長 50 字 |
+| `limit` | query | integer |  | 最小 1，最大 50，預設 `20` |
+
+**回應**
+
+- `200`：OK；`data` 是 object[]
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `tag` | string | 是 |  |
+| `question_count` | integer | 是 |  |
+| `score` | number | 是 | 相似度，0 到 1；沒有 q 時為 1 |
+
+- 錯誤：`400`、`401`
 
 ### PUT /questions/{question_id}/category
 
@@ -1163,6 +1222,7 @@ BCP 47 語言標籤
 | `body` | string |  | 最長 5000 字 |
 | `media_ids` | string[] |  | 最多 5 項 |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
+| `tags` | string[] |  | 選填的自訂標籤，和 `category` 並存。每個 1 到 20 字。最多 5 項 |
 | `category` | [Category](#category) |  | 選填。未填時由分類器判斷，信心不足或沒有文字時為 `uncategorized` |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `context` | [QuestionContext](#questioncontext) \| null |  |  |
@@ -1178,6 +1238,7 @@ BCP 47 語言標籤
 | `status` | [QuestionStatus](#questionstatus) | 是 |  |
 | `title` | string \| null | 是 | 內容待個資確認時為 null |
 | `category` | [Category](#category) | 是 |  |
+| `tags` | string[] | 是 |  |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |
@@ -1201,6 +1262,7 @@ BCP 47 語言標籤
 | `status` | [QuestionStatus](#questionstatus) | 是 |  |
 | `title` | string \| null | 是 | 內容待個資確認時為 null |
 | `category` | [Category](#category) | 是 |  |
+| `tags` | string[] | 是 |  |
 | `language` | [LanguageTag](#languagetag) | 是 |  |
 | `assistance_mode` | [AssistanceMode](#assistancemode) | 是 |  |
 | `location_sharing` | [LocationSharing](#locationsharing) | 是 |  |

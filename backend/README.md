@@ -37,7 +37,7 @@ npm test
 
 ## 目前進度
 
-`docs/api/openapi.yaml` 的 37 支 API 和 Socket.IO 訊號都已實作，也都有整合測試。推播走 FCM，見上方說明。
+`docs/api/openapi.yaml` 的 39 支 API 和 Socket.IO 訊號都已實作，也都有整合測試。推播走 FCM，見上方說明。
 
 另外提供三個不在 `/api/v1` 下的公開路由：`GET /media/{id}`、`GET /badges/{id}.svg`、`GET /share/{user_id}/{badge_id}`，以及分類器測試頁 `GET /classify-test`。
 

@@ -1339,3 +1339,128 @@ describe('影片上傳', () => {
     assert.equal(limits.video_max_seconds, 60);
   });
 });
+
+describe('自訂標籤', () => {
+  // 每個測試用獨立伺服器，標籤統計才不會互相影響。
+  const withServer = async (run) => {
+    const s = await startTestServer();
+    try { await run(s); } finally { await s.stop(); }
+  };
+  const create = async (s, user, tags, extra = {}) => {
+    const res = await s.call('POST', '/questions', { token: user.token, body: s.question({ tags, ...extra }) });
+    assert.equal(res.status, 201, res.raw);
+    return res.body.data;
+  };
+  const searchQ = async (s, user, query) => (await s.call('GET', '/questions', { token: user.token, query })).body.data.map((q) => q.id);
+  const searchTags = async (s, user, q) => (await s.call('GET', '/tags', { token: user.token, query: { q } })).body.data.map((t) => t.tag);
+
+  test('發問可帶標籤，和分類並存；會清理、去重並驗證', async () => withServer(async (s) => {
+    const user = await s.login();
+    const q = await create(s, user, ['#詐騙', ' 電話  詐騙 ', '詐騙', 'ＡＴＭ'], { category: 'scam_check' });
+    assert.deepEqual(q.tags, ['詐騙', '電話 詐騙', 'ATM']);
+    assert.equal(q.category, 'scam_check');
+    assert.deepEqual((await create(s, user, undefined)).tags, []);
+    const bad = (tags) => s.call('POST', '/questions', { token: user.token, body: s.question({ tags }) });
+    assert.equal((await bad(['a', 'b', 'c', 'd', 'e', 'f'])).status, 400);
+    assert.equal((await bad(['字'.repeat(21)])).status, 400);
+    assert.equal((await bad(['<script>'])).status, 400);
+    assert.equal((await bad(['   '])).status, 400);
+    assert.equal((await bad('詐騙')).status, 400);
+  }));
+
+  test('模糊搜尋問題：部分符合、臺台、大小寫、詞序、打錯字，並依相似度排序', async () => withServer(async (s) => {
+    const user = await s.login();
+    const exact = await create(s, user, ['詐騙']);
+    const partial = await create(s, user, ['電話詐騙手法']);
+    const taipei = await create(s, user, ['臺北通']);
+    const latin = await create(s, user, ['Password']);
+    const order = await create(s, user, ['辦理手續']);
+    const other = await create(s, user, ['公車']);
+
+    assert.deepEqual(await searchQ(s, user, { tag_q: '詐騙' }), [exact.id, partial.id]);
+    assert.deepEqual(await searchQ(s, user, { tag_q: '台北通' }), [taipei.id]);
+    assert.deepEqual(await searchQ(s, user, { tag_q: 'password' }), [latin.id]);
+    assert.deepEqual(await searchQ(s, user, { tag_q: 'passwrod' }), [latin.id]);
+    assert.deepEqual(await searchQ(s, user, { tag_q: '手續辦理' }), [order.id]);
+    assert.deepEqual(await searchQ(s, user, { tag_q: '完全無關的字' }), []);
+    assert.ok(!(await searchQ(s, user, { tag_q: '詐騙' })).includes(other.id));
+    assert.equal((await s.call('GET', '/questions', { token: user.token, query: { tag_q: '   ' } })).status, 400);
+    assert.deepEqual(await searchQ(s, user, { tag: '台北通' }), [taipei.id]);
+    assert.deepEqual(await searchQ(s, user, { tag: '台北' }), [], 'tag 是完全比對');
+  }));
+
+  test('模糊搜尋可和其他條件併用，也能分頁', async () => withServer(async (s) => {
+    const user = await s.login();
+    const scam = await create(s, user, ['詐騙'], { category: 'scam_check' });
+    await create(s, user, ['詐騙'], { category: 'other' });
+    assert.deepEqual(await searchQ(s, user, { tag_q: '詐騙', category: 'scam_check' }), [scam.id]);
+    const near = await create(s, user, ['詐騙'], { location_sharing: 'approximate', location: TAIPEI });
+    assert.deepEqual(await searchQ(s, user, { tag_q: '詐騙', scope: 'nearby', lat: String(TAIPEI.lat), lng: String(TAIPEI.lng) }), [near.id]);
+
+    const seen = new Set();
+    let cursor;
+    do {
+      const res = await s.call('GET', '/questions', { token: user.token, query: { tag_q: '詐騙', limit: '2', ...(cursor && { cursor }) } });
+      res.body.data.forEach((q) => seen.add(q.id));
+      cursor = res.body.next_cursor;
+    } while (cursor);
+    assert.equal(seen.size, 3);
+  }));
+
+  test('GET /tags 模糊比對、統計使用次數；沒有 q 時回傳熱門標籤', async () => withServer(async (s) => {
+    const user = await s.login();
+    await create(s, user, ['詐騙']);
+    await create(s, user, ['詐騙', '公車']);
+    await create(s, user, ['電話詐騙']);
+    const fuzzy = await s.call('GET', '/tags', { token: user.token, query: { q: '詐騙' } });
+    assert.deepEqual(fuzzy.body.data.map((t) => [t.tag, t.question_count]), [['詐騙', 2], ['電話詐騙', 1]]);
+    assert.equal(fuzzy.body.data[0].score, 1);
+    assert.deepEqual(await searchTags(s, user, '不存在'), []);
+    const popular = await s.call('GET', '/tags', { token: user.token, query: { limit: '1' } });
+    assert.deepEqual(popular.body.data, [{ tag: '詐騙', question_count: 2, score: 1 }]);
+    assert.equal((await s.call('GET', '/tags', { query: { q: '詐騙' } })).status, 401);
+    assert.equal((await s.call('GET', '/tags', { token: user.token, query: { q: '  ' } })).status, 400);
+  }));
+
+  test('權限：發問者可增刪，其他人只能新增，低可信度不能改；撤回後標籤一併刪除', async () => withServer(async (s) => {
+    const asker = await s.login();
+    const volunteer = await s.login();
+    const low = await s.login();
+    const q = await create(s, asker, ['詐騙']);
+    const put = (user, tags) => s.call('PUT', '/questions/{question_id}/tags', { token: user.token, params: { question_id: q.id }, body: { tags } });
+
+    const added = await put(volunteer, ['詐騙', '假檢察官']);
+    assert.equal(added.status, 200, added.raw);
+    assert.deepEqual(added.body.data.tags, ['詐騙', '假檢察官']);
+    assert.equal((await put(volunteer, ['假檢察官'])).status, 403);
+    assert.deepEqual((await put(asker, ['假檢察官'])).body.data.tags, ['假檢察官']);
+    assert.deepEqual((await put(asker, [])).body.data.tags, []);
+    s.server.db.prepare('UPDATE users SET trust_score = -11 WHERE id = ?').run(low.user.id);
+    assert.equal((await put(low, ['亂標'])).status, 403);
+    assert.equal((await s.call('PUT', '/questions/{question_id}/tags', { token: asker.token, params: { question_id: q.id }, body: {} })).status, 400);
+    assert.equal((await s.call('PUT', '/questions/{question_id}/tags', { token: asker.token, params: { question_id: 'q_none' }, body: { tags: [] } })).status, 404);
+
+    await put(asker, ['要刪除']);
+    assert.equal((await s.call('DELETE', '/questions/{question_id}', { token: asker.token, params: { question_id: q.id } })).status, 204);
+    assert.equal(s.server.db.prepare('SELECT COUNT(*) AS n FROM question_tags').get().n, 0);
+    assert.deepEqual(await searchTags(s, asker, '要刪除'), []);
+  }));
+
+  test('修改標籤會發出更新訊號', async () => withServer(async (s) => {
+    const user = await s.login();
+    const q = await create(s, user, []);
+    const socket = await new Promise((done, fail) => {
+      const c = io(s.baseUrl, { auth: { token: user.token }, transports: ['websocket'], reconnection: false });
+      c.once('connect', () => done(c));
+      c.once('connect_error', fail);
+    });
+    try {
+      await new Promise((done) => socket.emit('question:subscribe', { question_id: q.id }, done));
+      const signal = new Promise((done) => socket.once('question.changed', done));
+      await s.call('PUT', '/questions/{question_id}/tags', { token: user.token, params: { question_id: q.id }, body: { tags: ['新標籤'] } });
+      assert.deepEqual(await signal, { question_id: q.id });
+    } finally {
+      socket.disconnect();
+    }
+  }));
+});

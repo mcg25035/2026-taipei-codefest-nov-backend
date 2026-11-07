@@ -83,6 +83,14 @@ CREATE TABLE IF NOT EXISTS media (
   position INTEGER,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS question_tags (
+  question_id TEXT NOT NULL REFERENCES questions(id),
+  tag_key TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (question_id, tag_key)
+);
+CREATE INDEX IF NOT EXISTS idx_question_tags_key ON question_tags (tag_key);
 CREATE TABLE IF NOT EXISTS assists (
   id TEXT PRIMARY KEY,
   question_id TEXT NOT NULL REFERENCES questions(id),

@@ -19,6 +19,7 @@ import { assistRoutes } from './routes/assists.js';
 import { piiRoutes } from './routes/pii.js';
 import { pushRoutes } from './routes/push.js';
 import { questionRoutes } from './routes/questions.js';
+import { tagRoutes } from './routes/tags.js';
 import { publicRewardRoutes, publicRewardApiRoutes, rewardRoutes } from './routes/rewards.js';
 import { createClassifier } from './classifier.js';
 import { classifyRoutes, classifyTestPage } from './routes/classify.js';
@@ -75,6 +76,7 @@ export function createServer(overrides = {}) {
   api.use(meRoutes(deps));
   api.use(mediaRoutes(deps));
   api.use(questionRoutes(deps));
+  api.use(tagRoutes(deps));
   api.use(answerRoutes(deps));
   api.use(assistRoutes(deps));
   api.use(piiRoutes(deps));

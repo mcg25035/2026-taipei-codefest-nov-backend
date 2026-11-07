@@ -207,6 +207,7 @@ paths:
       description: |
         `scope=nearby` 或 `sort=nearest` 時必須帶 `lat`、`lng`。
         任務板不是另一個資源，而是此列表依 `reward_points` 與 `can_claim` 呈現的畫面。
+        `tag`、`tag_q` 可和其他條件同時使用，例如 `tag_q=詐騙&status=open`。
         `sort=unanswered` 只回傳還沒有回答的問題，由新到舊排序。
       operationId: listQuestions
       parameters:
@@ -216,6 +217,8 @@ paths:
         - { name: radius_m, in: query, schema: { type: integer, minimum: 100, maximum: 5000, default: 1000 } }
         - { name: status, in: query, schema: { $ref: '#/components/schemas/QuestionStatus' } }
         - { name: category, in: query, schema: { $ref: '#/components/schemas/Category' } }
+        - { name: tag, in: query, description: 完全符合這個標籤（不分大小寫、全半形、臺台）, schema: { type: string } }
+        - { name: tag_q, in: query, description: 模糊搜尋標籤；沒指定 sort 且 scope 為 global 時依相似度排序, schema: { type: string, maxLength: 50 } }
         - { name: language, in: query, schema: { $ref: '#/components/schemas/LanguageTag' } }
         - { name: assistance_mode, in: query, schema: { $ref: '#/components/schemas/AssistanceMode' } }
         - { name: service_id, in: query, description: 只看某個城市通功能的問題, schema: { type: string } }
@@ -333,6 +336,76 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+
+  /questions/{question_id}/tags:
+    parameters:
+      - { $ref: '#/components/parameters/QuestionId' }
+    put:
+      tags: [Question]
+      summary: 設定問題的自訂標籤
+      description: |
+        傳入完整的標籤清單，會取代現有標籤。
+        發問者可以新增或移除；其他登入者只能新增，移除別人的標籤回傳 403。低可信度帳號回傳 403。
+        最多 5 個，每個 1 到 20 字，只能有文字、數字、空白、`-`、`_`、`·`；開頭的 `#` 會被移除。重複的標籤會合併。
+      operationId: setQuestionTags
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags]
+              properties:
+                tags:
+                  type: array
+                  maxItems: 5
+                  items: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/QuestionDetail' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /tags:
+    get:
+      tags: [Question]
+      summary: 搜尋標籤
+      description: |
+        有 `q` 時模糊比對並依相似度排序，能接受部分符合、詞序不同和打錯字；沒有 `q` 時回傳最多人使用的標籤。
+        比對時不分大小寫、全半形和臺台，也忽略空白和分隔符號。可用於輸入標籤時的自動完成。
+      operationId: searchTags
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 50 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [tag, question_count, score]
+                      properties:
+                        tag: { type: string }
+                        question_count: { type: integer }
+                        score: { type: number, description: 相似度，0 到 1；沒有 q 時為 1 }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
 
   /questions/{question_id}/category:
     parameters:
@@ -1194,6 +1267,11 @@ components:
           maxItems: 5
           items: { type: string }
         language: { $ref: '#/components/schemas/LanguageTag' }
+        tags:
+          type: array
+          maxItems: 5
+          description: 選填的自訂標籤，和 `category` 並存。每個 1 到 20 字
+          items: { type: string }
         category:
           allOf:
             - $ref: '#/components/schemas/Category'
@@ -1221,6 +1299,7 @@ components:
         - title
         - category
         - language
+        - tags
         - assistance_mode
         - location_sharing
         - author
@@ -1234,6 +1313,9 @@ components:
         status: { $ref: '#/components/schemas/QuestionStatus' }
         title: { type: [string, 'null'], description: 內容待個資確認時為 null }
         category: { $ref: '#/components/schemas/Category' }
+        tags:
+          type: array
+          items: { type: string }
         language: { $ref: '#/components/schemas/LanguageTag' }
         assistance_mode: { $ref: '#/components/schemas/AssistanceMode' }
         location_sharing: { $ref: '#/components/schemas/LocationSharing' }
