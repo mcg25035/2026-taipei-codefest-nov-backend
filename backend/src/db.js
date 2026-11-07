@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS answers (
   upvotes INTEGER NOT NULL DEFAULT 0,
   downvotes INTEGER NOT NULL DEFAULT 0,
   client_request_id TEXT,
+  cached_from_question_id TEXT,
+  cached_from_answer_id TEXT,
+  cached_similarity REAL,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_answers_question ON answers (question_id);
@@ -104,6 +107,10 @@ CREATE TABLE IF NOT EXISTS admin_actions (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_admin_actions_created ON admin_actions (created_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS question_embeddings (
+  question_id TEXT PRIMARY KEY REFERENCES questions(id),
+  vector BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS assists (
   id TEXT PRIMARY KEY,
   question_id TEXT NOT NULL REFERENCES questions(id),
@@ -189,5 +196,13 @@ export function openDatabase(dataDir) {
   if (!userColumns.has('role')) db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
   if (!userColumns.has('banned_at')) db.exec('ALTER TABLE users ADD COLUMN banned_at TEXT');
   if (!userColumns.has('ban_reason')) db.exec('ALTER TABLE users ADD COLUMN ban_reason TEXT');
+  const answerColumns = new Set(db.prepare('PRAGMA table_info(answers)').all().map((c) => c.name));
+  if (!answerColumns.has('cached_from_question_id')) {
+    db.exec(`
+      ALTER TABLE answers ADD COLUMN cached_from_question_id TEXT;
+      ALTER TABLE answers ADD COLUMN cached_from_answer_id TEXT;
+      ALTER TABLE answers ADD COLUMN cached_similarity REAL;
+    `);
+  }
   return db;
 }

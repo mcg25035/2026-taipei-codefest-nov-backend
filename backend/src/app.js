@@ -26,6 +26,7 @@ import { publicRewardRoutes, publicRewardApiRoutes, rewardRoutes } from './route
 import { createClassifier } from './classifier.js';
 import { classifyRoutes, classifyTestPage } from './routes/classify.js';
 import { createRewards } from './rewards.js';
+import { createSemanticCache } from './semanticCache.js';
 import { createSignatures } from './signatures.js';
 import { createSerializers } from './serialize.js';
 import { createRateLimiter } from './util.js';
@@ -48,8 +49,9 @@ export function createServer(overrides = {}) {
     transport: config.pushTransport ?? (config.push.serviceAccount && createFcmTransport(config.push.serviceAccount)),
   });
   const notifier = createNotifier({ db, config, getRealtime, push });
+  const semanticCache = createSemanticCache({ db, config, notifier, getRealtime });
   const deps = {
-    db, config, getRealtime, notifier, signatures, push,
+    db, config, getRealtime, notifier, signatures, push, semanticCache,
     audit: createAudit(db),
     requireAdmin: auth.requireAdmin,
     classifier: config.classifierOverride ?? createClassifier(),
@@ -95,14 +97,17 @@ export function createServer(overrides = {}) {
 
   const cleanup = startMediaCleanup(deps);
   if (push.enabled) console.log('FCM push enabled');
+  if (semanticCache.enabled) console.log('Semantic cache enabled');
 
   return {
     httpServer,
     db,
     config,
     push,
+    semanticCache,
     async close() {
       clearInterval(cleanup);
+      await semanticCache.close();
       await push.close();
       await realtime.close();
       await new Promise((resolve) => httpServer.close(resolve));

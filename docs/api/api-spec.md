@@ -40,6 +40,7 @@ curl -X POST $BASE/questions \
 - **防重送：** 網路不穩時，用相同的 `client_request_id` 重送，不會重複建立內容。
 - **分類：** 發問時可不填 `category`，由分類器判斷；信心不足時為 `uncategorized`，由志工用 `PUT /questions/{question_id}/category` 分類。
 - **標籤：** 除了分類，問題可帶最多 5 個自訂標籤。用 `GET /questions?tag_q=關鍵字` 模糊搜尋問題，用 `GET /tags?q=關鍵字` 做自動完成。
+- **語意快取：** 發問後可能很快收到機器人的回答，`author.role` 是 `bot`，`cached_from` 有值。收到 `answers.changed` 時重抓就會看到，介面要標示這是舊解答。
 - **媒體：** 先呼叫 `POST /media` 取得 `id`，再放進問題或回答的 `media_ids`。超過 24 小時未使用的檔案會被刪除。
 - **不會回傳的資料：** 倒讚數只留在後端；可信度評分只有管理員 API 看得到。
 - **身份：** 使用者資料都有 `role`：`user`、`admin`、`bot`。`bot` 的權限和一般使用者相同，前端要標示它是機器人。
@@ -398,6 +399,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 發問。
 
 `body` 和 `media_ids` 至少要有一個。
+語意快取啟用時，若問題和已採納解答的問題夠像，機器人會在回應之後自動新增一則回答（`cached_from` 有值），透過 `answers.changed` 通知。問題維持開啟。
 未填 `category` 時由分類器判斷；信心低於 70% 或沒有文字時為 `uncategorized`，交給志工分類。
 未填 `location_sharing` 時，採用使用者的預設等級。
 等級為 `off` 時不可帶 `location`，問題不會出現在附近列表，也不會通知附近的人；其他等級必須帶 `location`。
@@ -615,6 +617,7 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 | `media` | [Media](#media)[] | 是 |  |
 | `language` | [LanguageTag](#languagetag) |  |  |
 | `is_accepted` | boolean | 是 |  |
+| `cached_from` | object \| null |  | 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答 |
 | `votes` | [VoteSummary](#votesummary) | 是 |  |
 | `hidden_parts` | [HiddenPart](#hiddenpart)[] | 是 |  |
 | `created_at` | string（時間） | 是 |  |
@@ -1613,6 +1616,7 @@ BCP 47 語言標籤
 | `media` | [Media](#media)[] | 是 |  |
 | `language` | [LanguageTag](#languagetag) |  |  |
 | `is_accepted` | boolean | 是 |  |
+| `cached_from` | object \| null |  | 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答 |
 | `votes` | [VoteSummary](#votesummary) | 是 |  |
 | `hidden_parts` | [HiddenPart](#hiddenpart)[] | 是 |  |
 | `created_at` | string（時間） | 是 |  |

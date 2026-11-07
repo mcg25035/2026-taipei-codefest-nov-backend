@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import { ApiError, validationError } from '../errors.js';
 import { snap } from '../geo.js';
+import { RESERVED_ID_PREFIX } from '../semanticCache.js';
 import { serializeNotification } from '../notifications.js';
 import { meUser } from '../serialize.js';
 import {
@@ -21,6 +22,7 @@ export function publicSessionRoutes({ db, config }) {
   router.post('/sessions', (req, res) => {
     const body = requireBodyObject(req.body);
     const townpassUserId = requireString(body, 'townpass_user_id', { max: 128 });
+    if (townpassUserId.startsWith(RESERVED_ID_PREFIX)) throw validationError('這個 ID 保留給系統使用', { field: 'townpass_user_id' });
     const nickname = optionalString(body, 'nickname', { min: 1, max: 30 });
     const language = body.language === undefined ? 'zh-TW' : parseLanguage(body.language);
 

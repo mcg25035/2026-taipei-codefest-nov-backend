@@ -250,6 +250,7 @@ paths:
       summary: 發問
       description: |
         `body` 和 `media_ids` 至少要有一個。
+        語意快取啟用時，若問題和已採納解答的問題夠像，機器人會在回應之後自動新增一則回答（`cached_from` 有值），透過 `answers.changed` 通知。問題維持開啟。
         未填 `category` 時由分類器判斷；信心低於 70% 或沒有文字時為 `uncategorized`，交給志工分類。
         未填 `location_sharing` 時，採用使用者的預設等級。
         等級為 `off` 時不可帶 `location`，問題不會出現在附近列表，也不會通知附近的人；其他等級必須帶 `location`。
@@ -1704,6 +1705,16 @@ components:
           items: { $ref: '#/components/schemas/Media' }
         language: { $ref: '#/components/schemas/LanguageTag' }
         is_accepted: { type: boolean }
+        cached_from:
+          description: 由語意快取自動貼上時才有值，前端應標示這是機器人提供的舊解答
+          oneOf:
+            - type: object
+              required: [question_id, answer_id, similarity]
+              properties:
+                question_id: { type: string }
+                answer_id: { type: string, description: 來源回答的 ID，之後可能已被刪除 }
+                similarity: { type: number }
+            - type: 'null'
         votes: { $ref: '#/components/schemas/VoteSummary' }
         hidden_parts:
           type: array

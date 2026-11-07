@@ -138,6 +138,11 @@ export function createSerializers({ db, config, signatures }) {
         .map((f) => media(req, f, seen.needsSignature(f.id))),
       ...(row.language && { language: row.language }),
       is_accepted: Boolean(row.is_accepted),
+      cached_from: row.cached_from_question_id ? {
+        question_id: row.cached_from_question_id,
+        answer_id: row.cached_from_answer_id,
+        similarity: Number(row.cached_similarity.toFixed(3)),
+      } : null,
       votes: voteSummary(row, req.user.id),
       hidden_parts: seen.parts,
       created_at: row.created_at,

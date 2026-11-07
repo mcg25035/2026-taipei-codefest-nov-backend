@@ -1765,3 +1765,136 @@ describe('頁面問題統計', () => {
     assert.equal((await t.call('POST', '/questions', { token: user.token, body: body(9000) })).status, 400);
   });
 });
+
+describe('語意快取', () => {
+  // 用固定向量代替模型，測試才穩定；內積等於相似度。
+  const VECTORS = {
+    敬老卡要去哪裡申請: [1, 0, 0],
+    請問要怎麼辦敬老卡: [0.95, Math.sqrt(1 - 0.95 ** 2), 0],
+    勉強相似: [0.8, 0.6, 0],
+    完全不同: [0, 0, 1],
+  };
+  const embedder = () => {
+    const state = { fail: false, calls: [] };
+    return {
+      state,
+      embed: async (text) => {
+        state.calls.push(text);
+        if (state.fail) throw new Error('down');
+        return VECTORS[text] ?? [0, 0, 1];
+      },
+    };
+  };
+  const withServer = async (run, extra = {}) => {
+    const fake = embedder();
+    const s = await startTestServer({ embedderOverride: fake, semanticCacheThreshold: 0.88, ...extra });
+    try { await run(s, fake); } finally { await s.stop(); }
+  };
+  const ask3 = async (s, user, body, extra = {}) => {
+    const res = await s.call('POST', '/questions', { token: user.token, body: s.question({ body, ...extra }) });
+    assert.equal(res.status, 201, res.raw);
+    await s.server.semanticCache.idle();
+    return res.body.data;
+  };
+  const answersOf = async (s, user, id) => (await s.call('GET', '/questions/{question_id}/answers', { token: user.token, params: { question_id: id } })).body.data;
+  const seed = async (s, asker, helper, text = '敬老卡要去哪裡申請', body = '到區公所申請') => {
+    const q = await ask3(s, asker, text);
+    const a = (await s.call('POST', '/questions/{question_id}/answers', { token: helper.token, params: { question_id: q.id }, body: { body } })).body.data;
+    await s.call('POST', '/answers/{answer_id}/accept', { token: asker.token, params: { answer_id: a.id } });
+    return { q, a };
+  };
+
+  test('相似問題由機器人貼上已採納的解答，標明來源，問題維持開啟', async () => withServer(async (s) => {
+    const asker = await s.login();
+    const helper = await s.login();
+    const { q, a } = await seed(s, asker, helper);
+    const another = await s.login();
+    const q2 = await ask3(s, another, '請問要怎麼辦敬老卡');
+    const [cached] = await answersOf(s, another, q2.id);
+    assert.equal(cached.author.role, 'bot');
+    assert.match(cached.body, /到區公所申請/);
+    assert.equal(cached.cached_from.question_id, q.id);
+    assert.equal(cached.cached_from.answer_id, a.id);
+    assert.equal(cached.cached_from.similarity, 0.95);
+    const detail = (await s.call('GET', '/questions/{question_id}', { token: another.token, params: { question_id: q2.id } })).body.data;
+    assert.equal(detail.status, 'open');
+    assert.equal(detail.answer_count, 1);
+    const notes = (await s.call('GET', '/notifications', { token: another.token })).body.data;
+    assert.ok(notes.some((n) => n.type === 'new_answer' && n.question_id === q2.id));
+    const human = (await answersOf(s, asker, q.id))[0];
+    assert.equal(human.cached_from, null);
+    const accepted = await s.call('POST', '/answers/{answer_id}/accept', { token: another.token, params: { answer_id: cached.id } });
+    assert.equal(accepted.status, 200, accepted.raw);
+  }));
+
+  test('不夠像或來源還沒被採納時不回覆', async () => withServer(async (s) => {
+    const asker = await s.login();
+    const helper = await s.login();
+    const q = await ask3(s, asker, '敬老卡要去哪裡申請');
+    await s.call('POST', '/questions/{question_id}/answers', { token: helper.token, params: { question_id: q.id }, body: { body: '未採納的回答' } });
+    assert.deepEqual(await answersOf(s, asker, (await ask3(s, asker, '請問要怎麼辦敬老卡')).id), []);
+
+    const other = await s.login();
+    await s.call('POST', '/answers/{answer_id}/accept', { token: asker.token, params: { answer_id: (await answersOf(s, asker, q.id))[0].id } });
+    assert.deepEqual(await answersOf(s, other, (await ask3(s, other, '勉強相似')).id), []);
+    assert.deepEqual(await answersOf(s, other, (await ask3(s, other, '完全不同')).id), []);
+  }));
+
+  test('來源有待確認的個資標記時不引用，避免把隱藏內容貼出去', async () => withServer(async (s) => {
+    const asker = await s.login();
+    const helper = await s.login();
+    const { a } = await seed(s, asker, helper, '敬老卡要去哪裡申請', '打給0912345678');
+    const report = await s.call('POST', '/pii-reports', { token: helper.token, body: { target_type: 'answer', target_id: a.id, text_ranges: [{ start: 2, end: 12 }] } });
+    assert.equal(report.status, 201, report.raw);
+    assert.deepEqual(await answersOf(s, helper, (await ask3(s, helper, '請問要怎麼辦敬老卡')).id), []);
+  }));
+
+  test('模型服務失敗不影響發問，恢復後補算的舊問題可以被命中', async () => withServer(async (s, fake) => {
+    const asker = await s.login();
+    const helper = await s.login();
+    fake.state.fail = true;
+    const { q } = await seed(s, asker, helper);
+    assert.equal(q.answer_count, 0);
+    assert.equal(s.server.db.prepare('SELECT COUNT(*) AS n FROM question_embeddings').get().n, 0);
+    fake.state.fail = false;
+    await new Promise((r) => setTimeout(r, 120));
+    await s.server.semanticCache.idle();
+    assert.equal(s.server.db.prepare('SELECT COUNT(*) AS n FROM question_embeddings').get().n, 1);
+    const q2 = await ask3(s, helper, '請問要怎麼辦敬老卡');
+    assert.equal((await answersOf(s, helper, q2.id)).length, 1);
+  }, { embeddingBackfillMs: 50 }));
+
+  test('會發出更新訊號；撤回問題也刪除向量；沒有文字的問題不比對', async () => withServer(async (s, fake) => {
+    const asker = await s.login();
+    const helper = await s.login();
+    await seed(s, asker, helper);
+    fake.state.calls.length = 0;
+
+    const socket = await new Promise((done, fail) => {
+      const c = io(s.baseUrl, { auth: { token: helper.token }, transports: ['websocket'], reconnection: false });
+      c.once('connect', () => done(c));
+      c.once('connect_error', fail);
+    });
+    try {
+      await new Promise((done) => socket.emit('feed:subscribe', done));
+      let feedCount = 0;
+      socket.on('feed.changed', () => { feedCount++; });
+      const q2 = await ask3(s, helper, '請問要怎麼辦敬老卡');
+      await new Promise((r) => setTimeout(r, 80));
+      assert.ok(feedCount >= 2, '建立問題和機器人回覆都要通知');
+      assert.equal((await s.call('DELETE', '/questions/{question_id}', { token: helper.token, params: { question_id: q2.id } })).status, 204);
+      assert.equal(s.server.db.prepare('SELECT COUNT(*) AS n FROM question_embeddings WHERE question_id = ?').get(q2.id).n, 0);
+    } finally {
+      socket.disconnect();
+    }
+  }));
+
+  test('沒有設定模型服務時不啟用；保留 ID 不能登入', async () => {
+    const res = await t.call('POST', '/sessions', { body: { townpass_user_id: 'system:semantic-cache-bot' } });
+    assert.equal(res.status, 400);
+    assert.equal(t.server.semanticCache.enabled, false);
+    const user = await t.login();
+    const q = await ask(user);
+    assert.equal(q.answer_count, 0);
+  });
+});

@@ -6,6 +6,7 @@
 
 ```text
 backend/
+├─ embedding/           文字向量服務（Python）
 ├─ src/
 │  ├─ server.js          啟動入口
 │  ├─ app.js             組裝所有模組和路由
@@ -17,6 +18,7 @@ backend/
 │  ├─ realtime.js        Socket.IO 訊號與 SSE
 │  ├─ push.js            FCM 發送、重試、清除無效 token
 │  ├─ classifier.js      線上分類
+│  ├─ semanticCache.js   問題向量比對與機器人自動回覆
 │  ├─ tags.js            標籤驗證與模糊比對
 │  ├─ audit.js           管理員稽核紀錄
 │  ├─ rewards.js         徽章

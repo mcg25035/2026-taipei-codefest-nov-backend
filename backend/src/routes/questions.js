@@ -43,7 +43,7 @@ function parseQuestionLocation(body, level, mode) {
   return { approx: snap(location), exact: level === 'exact' || mode !== 'online' ? location : null };
 }
 
-export function questionRoutes({ db, config, serializers, notifier, getRealtime, limiter, removeMediaFiles, classifier, audit }) {
+export function questionRoutes({ db, config, serializers, notifier, getRealtime, limiter, removeMediaFiles, classifier, audit, semanticCache }) {
   const router = Router();
   const byId = db.prepare('SELECT * FROM questions WHERE id = ?');
   const byRequest = db.prepare('SELECT * FROM questions WHERE author_id = ? AND client_request_id = ?');
@@ -117,6 +117,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     const row = byId.get(id);
     notifier.notifyUsersNearQuestion(row);
     getRealtime().feedChanged();
+    semanticCache.questionCreated(row);
     res.status(201).json({ data: serializers.questionDetail(req, row) });
   });
 
@@ -305,6 +306,7 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
   `);
   const deleteRelated = [
     'DELETE FROM question_tags WHERE question_id = @id',
+    'DELETE FROM question_embeddings WHERE question_id = @id',
     'DELETE FROM pii_reports WHERE question_id = @id',
     'DELETE FROM votes WHERE answer_id IN (SELECT id FROM answers WHERE question_id = @id)',
     'DELETE FROM media WHERE question_id = @id OR answer_id IN (SELECT id FROM answers WHERE question_id = @id)',

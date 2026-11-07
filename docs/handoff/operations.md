@@ -23,6 +23,8 @@
 | `FCM_SERVICE_ACCOUNT_FILE` | 金鑰檔的路徑 | 不設定就不發推播，也不會報錯 |
 | `ADMIN_TOWNPASS_IDS` | 逗號分隔的 ID | 登入時取得管理員身份。**不要寫進 repo**，目前知道 ID 就能登入 |
 | `BOT_TOWNPASS_IDS` | 逗號分隔的 ID | 登入時取得機器人身份 |
+| `EMBEDDING_URL` | `http://127.0.0.1:5122` | 語意快取的模型服務；不設定就不啟用 |
+| `SEMANTIC_CACHE_THRESHOLD` | 預設 `0.88` | 越高越不容易誤答，也越不容易命中 |
 | `DATA_DIR` | 預設 `./data` | 資料庫和媒體檔 |
 | `CORS_ORIGIN` | 預設 `*` | 正式上線要改成前端網域 |
 | `FCM_CHANNEL_ID` | 預設值 | 要和 App 的通知通道一致 |
@@ -35,6 +37,8 @@ cd backend
 HOST=127.0.0.1 PORT=5121 \
 PUBLIC_BASE_URL=https://tpcodefest.mcloudtw.com \
 FCM_SERVICE_ACCOUNT_FILE="$PWD/<金鑰檔名>.json" \
+EMBEDDING_URL=http://127.0.0.1:5122 \
+ADMIN_TOWNPASS_IDS=<管理員 ID> BOT_TOWNPASS_IDS=<Bot ID> \
 setsid nohup node src/server.js >> data/server.log 2>&1 < /dev/null &
 ```
 
@@ -46,6 +50,26 @@ curl https://tpcodefest.mcloudtw.com/api/v1/healthz           # {"status":"ok"}
 ```
 
 frp 沒在跑時，在 repo 根目錄執行 `frpc -c ./frpc.toml`。
+
+## 語意快取的模型服務
+
+模型是 gte-multilingual-base 的量化 ONNX，約 340 MB，執行時約佔 900 MB 記憶體。服務只聽本機，**不可對外開放**。沒開也不影響發問，只是不會自動回覆，恢復後會補算舊問題。
+
+首次安裝：
+
+```bash
+cd backend/embedding
+./download-model.sh
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+```
+
+啟動：
+
+```bash
+cd backend/embedding
+setsid nohup venv/bin/python server.py >> ../data/embedding.log 2>&1 < /dev/null &
+curl http://127.0.0.1:5122/healthz
+```
 
 ## 停止與重新部署
 
