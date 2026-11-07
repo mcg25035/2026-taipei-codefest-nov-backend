@@ -18,8 +18,6 @@ servers:
 tags:
   - name: Session
   - name: Me
-  - name: Device
-    description: FCM 推播
   - name: Media
   - name: Question
   - name: Answer
@@ -29,6 +27,8 @@ tags:
     description: 個資標記與遮蔽
   - name: Reward
   - name: Notification
+  - name: Push
+    description: FCM 推播裝置註冊
   - name: Realtime
   - name: Meta
 security:
@@ -164,44 +164,6 @@ paths:
                       next_heartbeat_seconds: { type: integer, example: 60 }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
-
-  /devices/{installation_id}:
-    parameters:
-      - name: installation_id
-        in: path
-        required: true
-        description: App 安裝時產生的唯一值，同一支手機重裝前保持不變
-        schema: { type: string, minLength: 1, maxLength: 128 }
-    put:
-      tags: [Device]
-      summary: 註冊或更新手機的 FCM token
-      description: |
-        App 登入後，以及 FCM token 更新時呼叫。只支援 Android。
-        同一個 token 只會對應一位使用者：換帳號登入時，舊帳號的推播會立刻停止。
-      operationId: upsertDevice
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [fcm_token]
-              properties:
-                fcm_token: { type: string, minLength: 1, maxLength: 4096 }
-                app_version: { type: string, maxLength: 64 }
-      responses:
-        '204': { description: 已更新 }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-    delete:
-      tags: [Device]
-      summary: 解除註冊
-      description: 使用者登出時呼叫，之後這支手機不再收到推播。
-      operationId: deleteDevice
-      responses:
-        '204': { description: 已刪除 }
-        '401': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
 
   /media:
     post:
@@ -930,6 +892,44 @@ paths:
                             score: { type: number }
         '400': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
+
+  /push-tokens/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        description: 城市通 `push_token` 取得的 FCM token，要用 `encodeURIComponent` 編碼
+        schema: { type: string, maxLength: 4096 }
+    put:
+      tags: [Push]
+      summary: 註冊或更新此裝置的 FCM token
+      description: |
+        以 token 為唯一鍵 upsert，綁定到目前登入的使用者；同一使用者可有多支裝置，最多保留最近 10 個。
+        token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主動通知網頁，
+        所以每次載入頁面或登入後都要呼叫 `push_token` 並重新上傳。`push_token` 回傳 `null` 時不用呼叫。
+      operationId: registerPushToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform]
+              properties:
+                platform: { type: string, enum: [android, ios] }
+      responses:
+        '204': { description: 已註冊 }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Push]
+      summary: 取消此裝置的推播
+      description: 只會刪除屬於自己的 token；token 不存在時一樣回 204。
+      operationId: unregisterPushToken
+      responses:
+        '204': { description: 已取消 }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
 
   /meta:
     get:

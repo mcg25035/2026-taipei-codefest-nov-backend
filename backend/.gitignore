@@ -1,3 +1,6 @@
 node_modules/
 data/
 .env
+# Firebase 服務帳戶金鑰
+*firebase-adminsdk*.json
+service-account*.json

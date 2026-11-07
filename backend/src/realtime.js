@@ -52,10 +52,9 @@ export function createRealtime({ httpServer, db, auth, config, serializeNotifica
 
     deliverNotification(row) {
       const connections = streams.get(row.user_id);
-      if (!connections?.size) return false;
+      if (!connections?.size) return;
       for (const res of connections) res.write(`event: notification.created\ndata: ${JSON.stringify(serializeNotification(row))}\n\n`);
       markDelivered.run(nowIso(), row.id);
-      return true;
     },
 
     openNotificationStream(req, res) {

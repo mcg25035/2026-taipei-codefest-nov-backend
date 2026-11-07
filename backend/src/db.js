@@ -119,14 +119,7 @@ CREATE TABLE IF NOT EXISTS user_badges (
   earned_at TEXT NOT NULL,
   PRIMARY KEY (user_id, badge_id)
 );
-CREATE TABLE IF NOT EXISTS devices (
-  installation_id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id),
-  fcm_token TEXT NOT NULL UNIQUE,
-  app_version TEXT,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id);
+DROP TABLE IF EXISTS devices;
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -153,6 +146,13 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, created_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  platform TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_nearby_once ON notifications (user_id, question_id)
   WHERE type = 'nearby_question';
 `;

@@ -19,10 +19,6 @@ npm test
 
 設定值見 `.env.example`，要透過環境變數傳入，例如 `PORT=8080 npm start`；也可以用 `node --env-file=.env src/server.js`。資料存在 `DATA_DIR`（預設 `./data`），包含 `app.db` 和 `media/`，要備份時整個目錄一起備份。
 
-## 推播
-
-用 `FIREBASE_SERVICE_ACCOUNT_FILE` 指定 Firebase 服務帳號金鑰的路徑；未設定時不發推播，其他功能照常。金鑰不可進版控，`.gitignore` 已排除 `*firebase-adminsdk*.json`。
-
 ## 放在反向代理後面
 
 - 要轉送 WebSocket（`/socket.io/`），Socket.IO 才能用 WebSocket 連線。
@@ -30,9 +26,18 @@ npm test
 - 要傳 `Host` 和 `X-Forwarded-Proto`，或直接設定 `PUBLIC_BASE_URL`，否則媒體網址可能不正確。
 - 上傳上限要設到 20 MB 以上。
 
+## FCM 推播
+
+設定 `FCM_SERVICE_ACCOUNT_FILE`（金鑰檔路徑）或 `FCM_SERVICE_ACCOUNT_JSON`（整份 JSON，適合放在部署平台的環境變數）後啟用。金鑰在 Firebase 主控台 → 專案設定 → 服務帳戶 → 產生新的私密金鑰，要和城市通 App 用同一個 Firebase 專案。
+
+- 直接呼叫 FCM HTTP v1 API，自行用服務帳戶簽 JWT 換 access token，沒有使用 `firebase-admin`。
+- 每則通知建立後，會推播到該使用者所有已註冊的裝置；推播在 API 回應後才非同步送出，失敗不影響 API。
+- FCM 回報 token 失效（`UNREGISTERED` 等）時刪除該 token；429、5xx 和網路錯誤會指數退避，最多試 3 次。
+- 未設定金鑰時，`PUT /push-tokens/{token}` 照常儲存，只是不發推播。
+
 ## 目前進度
 
-`docs/api/openapi.yaml` 的 37 支 API 和 Socket.IO 訊號都已實作，也都有整合測試。只支援 Android，推播走 FCM，沒有 APNs。
+`docs/api/openapi.yaml` 的 37 支 API 和 Socket.IO 訊號都已實作，也都有整合測試。推播走 FCM，見上方說明。
 
 另外提供三個不在 `/api/v1` 下的公開路由：`GET /media/{id}`、`GET /badges/{id}.svg`、`GET /share/{user_id}/{badge_id}`，以及分類器測試頁 `GET /classify-test`。
 
@@ -44,3 +49,5 @@ npm test
 - 語音檔只檢查宣告的格式與長度，不會重新編碼，檔內的中繼資料會保留。
 - `district` 尚未實作，一律回傳 `null`。
 - 頻率限制存在記憶體，重啟後歸零，也只適用單一程序。
+- 推播已送出後，即使問題標題被標記為個資，鎖定畫面上已顯示的通知也無法收回。
+- 推播重試排程存在記憶體，程序重啟時尚未送出的推播會遺失；使用者仍可從 `GET /notifications` 看到。

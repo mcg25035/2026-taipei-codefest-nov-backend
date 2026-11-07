@@ -28,8 +28,8 @@ export function createNotifier({ db, config, getRealtime, push }) {
     });
     if (!changes) return null;
     const row = select.get(id);
-    // App 連著 SSE 就不必再推播，避免同一則通知出現兩次。
-    if (!getRealtime().deliverNotification(row)) push.send(row);
+    getRealtime().deliverNotification(row);
+    push.notificationCreated(row);
     return row;
   };
 

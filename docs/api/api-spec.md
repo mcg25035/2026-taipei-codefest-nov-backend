@@ -107,13 +107,13 @@ socket.on('answers.changed', ({ question_id }) => refetchAnswers(question_id));
 
 通知的 `type`：`nearby_question`、`new_answer`、`answer_accepted`、`assist_claimed`、`assist_arrived`、`assist_completed`、`assist_cancelled`、`pii_report_pending`、`pii_report_resolved`、`badge_earned`。
 
-App 沒連 SSE 時，後端改用 FCM 推播；全部失敗時才留給 `POST /me/heartbeat` 取回。
+SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一則通知，所以收到 SSE 時只更新畫面，不要再呼叫 `notify`。
 
 ### FCM 推播
 
-App 登入後用 `PUT /devices/{installation_id}` 註冊 token，登出時用 `DELETE`。
+每次載入頁面或登入後，用 `PUT /push-tokens/{token}` 上傳 token（`token` 要用 `encodeURIComponent` 編碼），登出時用 `DELETE`。
 
-推播的 `notification` 帶 `title` 和 `body`，`data` 帶 `notification_id`、`type`、`question_id`，**不帶精確位置**。要用 `notification_id` 去重；需要完整內容時呼叫 `GET /notifications`。
+推播的 `notification` 帶 `title` 和 `body`，`data` 帶 `notification_id`、`type`，有問題時另帶 `question_id` 和 `url`。**不帶精確位置。**
 
 ## 不在 `/api/v1` 下的公開路由
 
@@ -131,8 +131,6 @@ App 登入後用 `PUT /devices/{installation_id}` 註冊 token，登出時用 `D
 | GET | `/me` | 取得自己的資料與設定 | 是 |
 | PATCH | `/me` | 更新暱稱、語言與附近通知設定 | 是 |
 | POST | `/me/heartbeat` | 回報位置並取回未送達的通知 | 是 |
-| PUT | `/devices/{installation_id}` | 註冊或更新手機的 FCM token | 是 |
-| DELETE | `/devices/{installation_id}` | 解除註冊 | 是 |
 | POST | `/media` | 上傳圖片或語音 | 是 |
 | GET | `/questions` | 問題列表（論壇與任務板共用） | 是 |
 | POST | `/questions` | 發問 | 是 |
@@ -162,6 +160,8 @@ App 登入後用 `PUT /devices/{installation_id}` 註冊 token，登出時用 `D
 | POST | `/notifications/read` | 標記已讀 | 是 |
 | GET | `/notifications/stream` | SSE 個人通知串流 | 是 |
 | POST | `/classify` | 試算問題分類 | 否 |
+| PUT | `/push-tokens/{token}` | 註冊或更新此裝置的 FCM token | 是 |
+| DELETE | `/push-tokens/{token}` | 取消此裝置的推播 | 是 |
 | GET | `/meta` | 前端需要的列舉與限制 | 否 |
 | GET | `/healthz` | 健康檢查 | 否 |
 
@@ -252,49 +252,49 @@ App 登入後用 `PUT /devices/{installation_id}` 註冊 token，登出時用 `D
 
 - 錯誤：`400`、`401`
 
-## 裝置與推播
+## 推播
 
-### PUT /devices/{installation_id}
+### PUT /push-tokens/{token}
 
-註冊或更新手機的 FCM token。
+註冊或更新此裝置的 FCM token。
 
-App 登入後，以及 FCM token 更新時呼叫。只支援 Android。
-同一個 token 只會對應一位使用者：換帳號登入時，舊帳號的推播會立刻停止。
+以 token 為唯一鍵 upsert，綁定到目前登入的使用者；同一使用者可有多支裝置，最多保留最近 10 個。
+token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主動通知網頁，
+所以每次載入頁面或登入後都要呼叫 `push_token` 並重新上傳。`push_token` 回傳 `null` 時不用呼叫。
 
 **參數**
 
 | 名稱 | 位置 | 型別 | 必填 | 說明 |
 |---|---|---|---|---|
-| `installation_id` | 路徑 | string | 是 | App 安裝時產生的唯一值，同一支手機重裝前保持不變。最短 1，最長 128 字 |
+| `token` | 路徑 | string | 是 | 城市通 `push_token` 取得的 FCM token，要用 `encodeURIComponent` 編碼。最長 4096 字 |
 
 **請求內容**（`application/json`）
 
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
-| `fcm_token` | string | 是 | 最短 1，最長 4096 字 |
-| `app_version` | string |  | 最長 64 字 |
+| `platform` | `android` \| `ios` | 是 |  |
 
 **回應**
 
-- `204`：已更新，沒有內容
+- `204`：已註冊，沒有內容
 - 錯誤：`400`、`401`
 
-### DELETE /devices/{installation_id}
+### DELETE /push-tokens/{token}
 
-解除註冊。
+取消此裝置的推播。
 
-使用者登出時呼叫，之後這支手機不再收到推播。
+只會刪除屬於自己的 token；token 不存在時一樣回 204。
 
 **參數**
 
 | 名稱 | 位置 | 型別 | 必填 | 說明 |
 |---|---|---|---|---|
-| `installation_id` | 路徑 | string | 是 | App 安裝時產生的唯一值，同一支手機重裝前保持不變。最短 1，最長 128 字 |
+| `token` | 路徑 | string | 是 | 城市通 `push_token` 取得的 FCM token，要用 `encodeURIComponent` 編碼。最長 4096 字 |
 
 **回應**
 
-- `204`：已刪除，沒有內容
-- 錯誤：`401`、`404`
+- `204`：已取消，沒有內容
+- 錯誤：`400`、`401`
 
 ## 媒體
 
