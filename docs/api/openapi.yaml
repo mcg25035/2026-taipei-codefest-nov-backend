@@ -13,11 +13,13 @@ servers:
   - url: https://{host}/api/v1
     variables:
       host:
-        default: api.example.com
-        description: 自架伺服器的網域（待定）
+        default: tpcodefest.mcloudtw.com
+        description: 目前的測試伺服器
 tags:
   - name: Session
   - name: Me
+  - name: Device
+    description: FCM 推播
   - name: Media
   - name: Question
   - name: Answer
@@ -163,6 +165,44 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
 
+  /devices/{installation_id}:
+    parameters:
+      - name: installation_id
+        in: path
+        required: true
+        description: App 安裝時產生的唯一值，同一支手機重裝前保持不變
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    put:
+      tags: [Device]
+      summary: 註冊或更新手機的 FCM token
+      description: |
+        App 登入後，以及 FCM token 更新時呼叫。只支援 Android。
+        同一個 token 只會對應一位使用者：換帳號登入時，舊帳號的推播會立刻停止。
+      operationId: upsertDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fcm_token]
+              properties:
+                fcm_token: { type: string, minLength: 1, maxLength: 4096 }
+                app_version: { type: string, maxLength: 64 }
+      responses:
+        '204': { description: 已更新 }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Device]
+      summary: 解除註冊
+      description: 使用者登出時呼叫，之後這支手機不再收到推播。
+      operationId: deleteDevice
+      responses:
+        '204': { description: 已刪除 }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
   /media:
     post:
       tags: [Media]
@@ -240,6 +280,7 @@ paths:
       summary: 發問
       description: |
         `body` 和 `media_ids` 至少要有一個。
+        未填 `category` 時由分類器判斷；信心低於 70% 或沒有文字時為 `uncategorized`，交給志工分類。
         未填 `location_sharing` 時，採用使用者的預設等級。
         等級為 `off` 時不可帶 `location`，問題不會出現在附近列表，也不會通知附近的人；其他等級必須帶 `location`。
         `assistance_mode` 為 `onsite` 或 `either` 時，等級不可為 `off`，且 `location` 要傳精確座標。
@@ -303,6 +344,68 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+
+  /questions/{question_id}/resolve:
+    parameters:
+      - { $ref: '#/components/parameters/QuestionId' }
+    post:
+      tags: [Question]
+      summary: 發問者標記問題已解決
+      description: |
+        僅限發問者，不需要請求內容，也不需要留言或採納回答，沒有任何回答時也能使用。不會發積分。
+        已解決的問題回傳 409 `INVALID_STATE`；現場協助進行中回傳 409 `ASSIST_ACTIVE`。
+        標記後，所有人仍可回答和按讚，發問者也仍可採納回答。
+      operationId: resolveQuestion
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/QuestionDetail' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /questions/{question_id}/category:
+    parameters:
+      - { $ref: '#/components/parameters/QuestionId' }
+    put:
+      tags: [Question]
+      summary: 替問題分類
+      description: |
+        任何登入者都能替 `uncategorized` 的問題分類；已分類的問題回傳 409 `INVALID_STATE`。
+        發問者隨時可以修改自己的問題。不能改回 `uncategorized`，低可信度帳號回傳 403。
+        分類不會獲得積分。可用 `GET /questions?category=uncategorized` 列出待分類的問題。
+      operationId: categorizeQuestion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category]
+              properties:
+                category: { $ref: '#/components/schemas/Category' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/QuestionDetail' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
 
   /questions/{question_id}/answers:
     parameters:
@@ -388,6 +491,7 @@ paths:
       summary: 採納回答
       description: |
         僅限發問者，每題只能採納一次且不可撤銷。問題轉為 `resolved`，回答者獲得積分。
+        問題已用 `POST /questions/{question_id}/resolve` 標記解決時仍可採納；現場協助已完成時回傳 409 `INVALID_STATE`。
         有進行中的現場協助時回傳 409 `ASSIST_ACTIVE`。
       operationId: acceptAnswer
       responses:
@@ -411,7 +515,7 @@ paths:
     put:
       tags: [Answer]
       summary: 投正讚或倒讚
-      description: 每人每則回答一票，重複呼叫會覆蓋原本的票。不能投自己的回答。讚會影響回答排序與回答者的可信度評分，不影響積分。倒讚數和可信度評分不會出現在任何 API 回應中。
+      description: 所有登入者都能投票，不限發問者或參與者，問題解決後也能投。每人每則回答一票，重複呼叫會覆蓋原本的票。可以對自己的回答投正讚，但不加可信度；不能投倒讚。讚會影響回答排序與回答者的可信度評分，不影響積分。倒讚數和可信度評分不會出現在任何 API 回應中。
       operationId: voteAnswer
       requestBody:
         required: true
@@ -781,6 +885,52 @@ paths:
               schema: { type: string }
         '401': { $ref: '#/components/responses/Error' }
 
+  /classify:
+    post:
+      tags: [Question]
+      summary: 試算問題分類
+      description: |
+        回傳分類器的判斷，不會儲存文字，邏輯與 `POST /questions` 未填 `category` 時相同。不需要 token。
+        信心低於 `threshold` 或沒有可辨識的特徵時，`category` 是 `uncategorized`，應交給志工分類。
+      security: []
+      operationId: classifyText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 5000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [category, predicted, confidence, threshold, scores]
+                    properties:
+                      category: { $ref: '#/components/schemas/Category' }
+                      predicted: { $ref: '#/components/schemas/Category' }
+                      confidence: { type: number, minimum: 0, maximum: 1 }
+                      threshold: { type: number }
+                      scores:
+                        type: array
+                        items:
+                          type: object
+                          required: [category, score]
+                          properties:
+                            category: { $ref: '#/components/schemas/Category' }
+                            score: { type: number }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
   /meta:
     get:
       tags: [Meta]
@@ -897,7 +1047,8 @@ components:
 
     Category:
       type: string
-      enum: [map_navigation, admin_procedure, document_contract, scam_check, app_usage, language, other]
+      description: '`uncategorized` 表示分類器沒有把握，由志工之後分類；`other` 是已分類但不屬於其他類別。'
+      enum: [map_navigation, admin_procedure, document_contract, scam_check, app_usage, language, other, uncategorized]
 
     AssistanceMode:
       type: string
@@ -1033,7 +1184,7 @@ components:
 
     CreateQuestionRequest:
       type: object
-      required: [language, category, assistance_mode, client_request_id]
+      required: [language, assistance_mode, client_request_id]
       properties:
         title: { type: string, maxLength: 80, description: 選填，未填時由 body 前 30 字產生 }
         body: { type: string, maxLength: 5000 }
@@ -1042,7 +1193,10 @@ components:
           maxItems: 5
           items: { type: string }
         language: { $ref: '#/components/schemas/LanguageTag' }
-        category: { $ref: '#/components/schemas/Category' }
+        category:
+          allOf:
+            - $ref: '#/components/schemas/Category'
+          description: 選填。未填時由分類器判斷，信心不足或沒有文字時為 `uncategorized`
         assistance_mode: { $ref: '#/components/schemas/AssistanceMode' }
         context:
           oneOf:

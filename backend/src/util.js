@@ -13,6 +13,7 @@ export const CATEGORIES = {
   app_usage: '城市通操作',
   language: '語言與文字',
   other: '其他',
+  uncategorized: '未分類',
 };
 export const LANGUAGES = ['zh-TW', 'en', 'ja', 'ko', 'vi', 'id', 'th', 'tl'];
 export const ASSISTANCE_MODES = ['online', 'onsite', 'either'];

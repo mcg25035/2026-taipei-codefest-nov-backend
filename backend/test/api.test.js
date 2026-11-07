@@ -289,13 +289,20 @@ describe('回答、投票與採納', () => {
     assert.equal(trustOf(bad.user.id), 0);
   });
 
-  test('不能投自己的回答，值不正確回 400', async () => {
+  test('可對自己的回答投正讚但不加可信度，不能投倒讚；值不正確回 400', async () => {
     const asker = await t.login();
     const helper = await t.login();
     const q = await ask(asker);
     const a = await answer(helper, q.id);
-    const self = await t.call('PUT', '/answers/{answer_id}/vote', { token: helper.token, params: { answer_id: a.id }, body: { value: 1 } });
-    assert.equal(self.status, 403);
+    const selfVote = (value) => t.call('PUT', '/answers/{answer_id}/vote', { token: helper.token, params: { answer_id: a.id }, body: { value } });
+    assert.deepEqual((await selfVote(1)).body.data, { upvotes: 1, my_vote: 1 });
+    assert.equal(trustOf(helper.user.id), 0);
+    const down = await selfVote(-1);
+    assert.equal(down.status, 403);
+    assert.equal(down.body.error.code, 'SELF_ACTION_NOT_ALLOWED');
+    const undo = await t.call('DELETE', '/answers/{answer_id}/vote', { token: helper.token, params: { answer_id: a.id } });
+    assert.deepEqual(undo.body.data, { upvotes: 0, my_vote: null });
+    assert.equal(trustOf(helper.user.id), 0);
     const invalid = await t.call('PUT', '/answers/{answer_id}/vote', { token: asker.token, params: { answer_id: a.id }, body: { value: 2 } });
     assert.equal(invalid.status, 400);
   });
@@ -732,6 +739,15 @@ describe('現場協助', () => {
     assert.equal((await accept()).body.error.code, 'INVALID_STATE');
   });
 
+  test('現場協助進行中不能標記已解決', async () => {
+    const asker = await t.login();
+    const helper = await t.login();
+    const q = await onsite(asker);
+    await claim(helper, q.id);
+    const res = await t.call('POST', '/questions/{question_id}/resolve', { token: asker.token, params: { question_id: q.id } });
+    assert.equal(res.body.error.code, 'ASSIST_ACTIVE');
+  });
+
   test('assist.changed 訊號只送給雙方', async () => {
     const asker = await t.login();
     const helper = await t.login();
@@ -1044,5 +1060,335 @@ describe('刪除', () => {
     assert.equal(t.server.db.prepare('SELECT COUNT(*) AS n FROM assists WHERE question_id = ?').get(q.id).n, 0);
     const list = (await t.call('GET', '/notifications', { token: helper.token })).body.data;
     assert.ok(list.some((n) => n.type === 'assist_cancelled'));
+  });
+});
+
+describe('問題分類', () => {
+  const categorize = (user, id, category) => t.call('PUT', '/questions/{question_id}/category', {
+    token: user.token, params: { question_id: id }, body: { category },
+  });
+
+  test('分類器沒有把握時為 uncategorized，meta 也列出這個分類', async () => {
+    const user = await t.login();
+    const body = t.question({ body: '🤔🤔🤔' });
+    delete body.category;
+    const res = await t.call('POST', '/questions', { token: user.token, body });
+    assert.equal(res.status, 201, res.raw);
+    assert.equal(res.body.data.category, 'uncategorized');
+    const meta = await t.call('GET', '/meta');
+    assert.ok(meta.body.data.categories.some((c) => c.id === 'uncategorized'));
+    assert.equal((await t.call('POST', '/questions', { token: user.token, body: t.question({ category: 'nope' }) })).status, 400);
+  });
+
+  test('志工可分類未分類的問題，但不能改已分類的；可篩選待分類問題', async () => {
+    const asker = await t.login();
+    const volunteer = await t.login();
+    const body = t.question({ body: '🤔🤔🤔' });
+    delete body.category;
+    const q = (await t.call('POST', '/questions', { token: asker.token, body })).body.data;
+
+    const listed = await t.call('GET', '/questions', { token: volunteer.token, query: { category: 'uncategorized' } });
+    assert.ok(listed.body.data.some((x) => x.id === q.id));
+
+    assert.equal((await categorize(volunteer, q.id, 'uncategorized')).status, 400);
+    const done = await categorize(volunteer, q.id, 'scam_check');
+    assert.equal(done.status, 200, done.raw);
+    assert.equal(done.body.data.category, 'scam_check');
+    assert.equal((await t.call('GET', '/me', { token: volunteer.token })).body.data.points, 0);
+
+    const changed = await categorize(await t.login(), q.id, 'other');
+    assert.equal(changed.status, 409);
+    assert.equal(changed.body.error.code, 'INVALID_STATE');
+    assert.equal((await categorize(asker, q.id, 'other')).body.data.category, 'other', '發問者可以修改');
+    assert.equal((await categorize(volunteer, 'q_none', 'other')).status, 404);
+  });
+
+  test('低可信度帳號不能分類，且分類會發出更新訊號', async () => {
+    const asker = await t.login();
+    const low = await t.login();
+    const volunteer = await t.login();
+    const body = t.question({ body: '🤔🤔🤔' });
+    delete body.category;
+    const q = (await t.call('POST', '/questions', { token: asker.token, body })).body.data;
+    t.server.db.prepare('UPDATE users SET trust_score = -11 WHERE id = ?').run(low.user.id);
+    assert.equal((await categorize(low, q.id, 'other')).status, 403);
+
+    const socket = await new Promise((resolve, reject) => {
+      const s = io(t.baseUrl, { auth: { token: asker.token }, transports: ['websocket'], reconnection: false });
+      s.once('connect', () => resolve(s));
+      s.once('connect_error', reject);
+    });
+    try {
+      await new Promise((resolve) => socket.emit('question:subscribe', { question_id: q.id }, resolve));
+      const signal = new Promise((resolve) => socket.once('question.changed', resolve));
+      await categorize(volunteer, q.id, 'other');
+      assert.deepEqual(await signal, { question_id: q.id });
+    } finally {
+      socket.disconnect();
+    }
+  });
+});
+
+describe('已解決與回答解耦', () => {
+  const resolve = (user, id) => t.call('POST', '/questions/{question_id}/resolve', { token: user.token, params: { question_id: id } });
+  const detail = (user, id) => t.call('GET', '/questions/{question_id}', { token: user.token, params: { question_id: id } });
+
+  test('發問者不留言、沒有回答也能標記已解決，且不發積分', async () => {
+    const asker = await t.login();
+    const other = await t.login();
+    const q = await ask(asker);
+    assert.equal((await resolve(other, q.id)).status, 403);
+    const res = await resolve(asker, q.id);
+    assert.equal(res.status, 200, res.raw);
+    assert.equal(res.body.data.status, 'resolved');
+    assert.equal(res.body.data.answer_count, 0);
+    assert.equal(res.body.data.accepted_answer_id, null);
+    assert.equal((await t.call('GET', '/me', { token: asker.token })).body.data.points, 0);
+    assert.equal((await resolve(asker, q.id)).body.error.code, 'INVALID_STATE');
+    assert.equal((await t.call('POST', '/questions/{question_id}/resolve', { token: asker.token, params: { question_id: 'q_none' } })).status, 404);
+  });
+
+  test('標記已解決會清除精確座標，並發出更新訊號', async () => {
+    clearNearbyState();
+    const helper = await t.login();
+    await beat(helper, TAIPEI);
+    const asker = await t.login();
+    const q = await ask(asker, { location_sharing: 'exact', location: TAIPEI });
+    const socket = await new Promise((done, fail) => {
+      const s = io(t.baseUrl, { auth: { token: helper.token }, transports: ['websocket'], reconnection: false });
+      s.once('connect', () => done(s));
+      s.once('connect_error', fail);
+    });
+    try {
+      await new Promise((done) => socket.emit('question:subscribe', { question_id: q.id }, done));
+      const signal = new Promise((done) => socket.once('question.changed', done));
+      await resolve(asker, q.id);
+      assert.deepEqual(await signal, { question_id: q.id });
+    } finally {
+      socket.disconnect();
+    }
+    assert.equal(t.server.db.prepare('SELECT exact_lat FROM questions WHERE id = ?').get(q.id).exact_lat, null);
+    const list = await t.call('GET', '/notifications', { token: helper.token });
+    assert.ok(list.body.data.every((n) => n.exact_location === null));
+  });
+
+  test('未參與的人可以按讚，問題解決後仍可回答、按讚和採納', async () => {
+    const asker = await t.login();
+    const helper = await t.login();
+    const browser = await t.login();
+    const q = await ask(asker);
+    const a = await answer(helper, q.id);
+    await resolve(asker, q.id);
+
+    const vote = await t.call('PUT', '/answers/{answer_id}/vote', { token: browser.token, params: { answer_id: a.id }, body: { value: 1 } });
+    assert.deepEqual(vote.body.data, { upvotes: 1, my_vote: 1 });
+    assert.equal(trustOf(helper.user.id), 1);
+    await answer(browser, q.id, '問題解決後的補充');
+    assert.equal((await detail(asker, q.id)).body.data.answer_count, 2);
+
+    const accepted = await t.call('POST', '/answers/{answer_id}/accept', { token: asker.token, params: { answer_id: a.id } });
+    assert.equal(accepted.status, 200, accepted.raw);
+    assert.equal((await t.call('GET', '/me', { token: helper.token })).body.data.points, 10);
+    assert.equal((await detail(asker, q.id)).body.data.status, 'resolved');
+    const again = await t.call('POST', '/answers/{answer_id}/accept', { token: asker.token, params: { answer_id: a.id } });
+    assert.equal(again.body.error.code, 'ALREADY_ACCEPTED');
+  });
+});
+
+describe('問題分類器', () => {
+  const classify = (text) => t.call('POST', '/classify', { body: { text } });
+
+  test('明顯的問題會自動分類，且不需要 token', async () => {
+    assert.equal((await classify('有人打電話說我涉及洗錢要我匯款到安全帳戶')).body.data.category, 'scam_check');
+    assert.equal((await classify('我要去市政府要坐哪一路公車')).body.data.category, 'map_navigation');
+    const res = await classify('敬老卡要去哪裡申請');
+    assert.equal(res.body.data.category, 'admin_procedure');
+    assert.equal(res.body.data.scores.length, 7);
+    assert.ok(Math.abs(res.body.data.scores.reduce((a, s) => a + s.score, 0) - 1) < 0.01);
+  });
+
+  test('沒有可辨識內容時維持未分類，不會亂猜', async () => {
+    const res = await classify('🤔🤔🤔');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.data.category, 'uncategorized');
+  });
+
+  test('參數檢查與頻率限制，文字不會寫入資料庫', async () => {
+    assert.equal((await classify('')).status, 400);
+    assert.equal((await classify('字'.repeat(5001))).status, 400);
+    assert.equal((await t.call('POST', '/classify', { body: { text: 123 } })).status, 400);
+    const marker = `secret-${Date.now()}`;
+    await classify(marker);
+    for (const { name } of t.server.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()) {
+      assert.equal(JSON.stringify(t.server.db.prepare(`SELECT * FROM ${name}`).all()).includes(marker), false, name);
+    }
+    const limited = await startTestServer({ classifyPerMinute: 1 });
+    try {
+      assert.equal((await limited.call('POST', '/classify', { body: { text: '你好' } })).status, 200);
+      const res = await limited.call('POST', '/classify', { body: { text: '你好' } });
+      assert.equal(res.body.error.code, 'RATE_LIMITED');
+    } finally {
+      await limited.stop();
+    }
+  });
+
+  test('發問沒帶分類時自動分類，有把握才分；帶分類時以發問者為準；測試頁可以開啟', async () => {
+    const user = await t.login();
+    const volunteer = await t.login();
+    const create = async (extra) => {
+      const body = t.question(extra);
+      if (!('category' in extra)) delete body.category;
+      const res = await t.call('POST', '/questions', { token: user.token, body });
+      assert.equal(res.status, 201, res.raw);
+      return res.body.data;
+    };
+    const scam = await create({ body: '有人叫我買遊戲點數給他' });
+    assert.equal(scam.category, 'scam_check');
+    assert.equal((await t.call('PUT', '/questions/{question_id}/category', { token: volunteer.token, params: { question_id: scam.id }, body: { category: 'other' } })).status, 409, '已自動分類的問題志工不能改');
+
+    assert.equal((await create({ body: '🤔🤔🤔' })).category, 'uncategorized');
+    assert.equal((await create({ body: '有人叫我買遊戲點數給他', category: 'other' })).category, 'other');
+    assert.equal((await create({ body: '資料', title: '有人叫我買遊戲點數給他' })).category, 'scam_check', '標題也要納入判斷');
+
+    const page = await fetch(`${t.baseUrl}/classify-test`);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /問題分類測試/);
+  });
+});
+
+describe('FCM 推播', () => {
+  const nextTick = () => new Promise((r) => setTimeout(r, 30));
+  const fake = (handler) => {
+    const sent = [];
+    return {
+      sent,
+      sendEach: async (messages) => {
+        sent.push(...messages);
+        return { responses: messages.map(handler) };
+      },
+    };
+  };
+  const withServer = async (client, run) => {
+    const s = await startTestServer({ pushClient: client });
+    try { await run(s); } finally { await s.stop(); }
+  };
+  const put = (s, user, id, fcm_token) => s.call('PUT', '/devices/{installation_id}', { token: user.token, params: { installation_id: id }, body: { fcm_token } });
+  const post = (s, user, id, body) => s.call('POST', '/questions/{question_id}/answers', { token: user.token, params: { question_id: id }, body: { body } });
+  const newQuestion = async (s, user, extra = {}) => (await s.call('POST', '/questions', { token: user.token, body: s.question(extra) })).body.data;
+
+  test('沒連 SSE 時發推播，不帶精確位置，且 heartbeat 不重複回傳', async () => {
+    const client = fake(() => ({ success: true }));
+    await withServer(client, async (s) => {
+      const asker = await s.login();
+      const helper = await s.login();
+      const q = await newQuestion(s, asker);
+      assert.equal((await put(s, asker, 'phone-1', 'tok-1')).status, 204);
+      await post(s, helper, q.id, '回答');
+      await nextTick();
+      assert.equal(client.sent.length, 1);
+      const [m] = client.sent;
+      assert.equal(m.token, 'tok-1');
+      assert.equal(m.data.type, 'new_answer');
+      assert.equal(m.data.question_id, q.id);
+      assert.equal(m.android.priority, 'high');
+      const beatRes = await s.call('POST', '/me/heartbeat', { token: asker.token, body: { app_state: 'background' } });
+      assert.equal(beatRes.body.data.notifications.length, 0);
+
+      const nearby = await s.login();
+      await s.call('PATCH', '/me', { token: nearby.token, body: { location_sharing: 'exact' } });
+      await s.call('POST', '/me/heartbeat', { token: nearby.token, body: { app_state: 'background', location: TAIPEI } });
+      await put(s, nearby, 'phone-2', 'tok-2');
+      await newQuestion(s, asker, { location_sharing: 'exact', location: TAIPEI });
+      await nextTick();
+      const m2 = client.sent.find((x) => x.token === 'tok-2');
+      assert.equal(m2.data.type, 'nearby_question');
+      assert.equal(JSON.stringify(m2).includes(String(TAIPEI.lat)), false, '精確位置不可經過 FCM');
+    });
+  });
+
+  test('連著 SSE 時不重複推播', async () => {
+    const client = fake(() => ({ success: true }));
+    await withServer(client, async (s) => {
+      const asker = await s.login();
+      const helper = await s.login();
+      await put(s, asker, 'phone-1', 'tok-1');
+      const controller = new AbortController();
+      const stream = await fetch(`${s.baseUrl}/api/v1/notifications/stream`, { headers: { Authorization: `Bearer ${asker.token}` }, signal: controller.signal });
+      const reader = stream.body.getReader();
+      await reader.read();
+      const q = await newQuestion(s, asker);
+      await post(s, helper, q.id, '回答');
+      await nextTick();
+      assert.equal(client.sent.length, 0);
+      controller.abort();
+    });
+  });
+
+  test('失效的 token 會被刪除；暫時失敗時保留，通知改由 heartbeat 取回', async () => {
+    const client = fake((m) => (m.token === 'dead'
+      ? { success: false, error: { code: 'messaging/registration-token-not-registered' } }
+      : { success: false, error: { code: 'messaging/internal-error' } }));
+    await withServer(client, async (s) => {
+      const asker = await s.login();
+      const helper = await s.login();
+      await put(s, asker, 'phone-dead', 'dead');
+      await put(s, asker, 'phone-busy', 'busy');
+      const q = await newQuestion(s, asker);
+      await post(s, helper, q.id, '回答');
+      await nextTick();
+      const tokens = s.server.db.prepare('SELECT fcm_token FROM devices').all().map((d) => d.fcm_token);
+      assert.deepEqual(tokens, ['busy']);
+      const res = await s.call('POST', '/me/heartbeat', { token: asker.token, body: { app_state: 'background' } });
+      assert.equal(res.body.data.notifications.length, 1);
+    });
+  });
+
+  test('FCM 整個失敗時不影響回答流程', async () => {
+    const client = { sendEach: async () => { throw new Error('network down'); } };
+    await withServer(client, async (s) => {
+      const asker = await s.login();
+      const helper = await s.login();
+      await put(s, asker, 'phone-1', 'tok-1');
+      const q = await newQuestion(s, asker);
+      assert.equal((await post(s, helper, q.id, '回答')).status, 201);
+      await nextTick();
+      assert.equal((await s.call('GET', '/notifications', { token: asker.token })).body.data.length, 1);
+    });
+  });
+
+  test('換帳號後舊帳號不再推到這支手機；只能刪除自己的裝置', async () => {
+    const client = fake(() => ({ success: true }));
+    await withServer(client, async (s) => {
+      const first = await s.login();
+      const second = await s.login();
+      const helper = await s.login();
+      await put(s, first, 'phone-1', 'tok-1');
+      await put(s, second, 'phone-1b', 'tok-1');
+      const q = await newQuestion(s, first);
+      await post(s, helper, q.id, '回答');
+      await nextTick();
+      assert.equal(client.sent.length, 0);
+
+      const del = (user, id) => s.call('DELETE', '/devices/{installation_id}', { token: user.token, params: { installation_id: id } });
+      assert.equal((await del(first, 'phone-1b')).status, 404);
+      assert.equal((await del(second, 'phone-1b')).status, 204);
+      assert.equal((await s.call('PUT', '/devices/{installation_id}', { token: first.token, params: { installation_id: 'x' }, body: {} })).status, 400);
+    });
+  });
+});
+
+describe('分類器失敗時', () => {
+  test('仍可發問，分類維持未分類', async () => {
+    const s = await startTestServer({ classifierOverride: { threshold: 0.7, classify() { throw new Error('boom'); } } });
+    try {
+      const user = await s.login();
+      const body = s.question({ body: '有人叫我買遊戲點數給他' });
+      delete body.category;
+      const res = await s.call('POST', '/questions', { token: user.token, body });
+      assert.equal(res.status, 201, res.raw);
+      assert.equal(res.body.data.category, 'uncategorized');
+    } finally {
+      await s.stop();
+    }
   });
 });

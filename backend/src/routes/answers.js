@@ -104,6 +104,8 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
     INSERT INTO point_transactions (id, user_id, amount, reason, question_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
   `);
 
+  const completedAssist = db.prepare("SELECT 1 FROM assists WHERE question_id = ? AND status = 'completed' LIMIT 1");
+
   router.post('/answers/:id/accept', (req, res) => {
     const answer = answerById.get(req.params.id);
     if (!answer) throw notFound();
@@ -112,7 +114,8 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
     if (answer.author_id === req.user.id) throw new ApiError(403, 'SELF_ACTION_NOT_ALLOWED', '不能採納自己的回答');
     if (question.accepted_answer_id) throw new ApiError(409, 'ALREADY_ACCEPTED', '這個問題已經採納過回答');
     if (question.status === 'in_progress') throw new ApiError(409, 'ASSIST_ACTIVE', '現場協助進行中，不能採納回答');
-    if (question.status !== 'open') throw new ApiError(409, 'INVALID_STATE', '目前狀態不能採納回答');
+    // 發問者先標記已解決，之後仍可採納回答；現場協助完成的問題已經發過積分，不能再採納。
+    if (completedAssist.get(question.id)) throw new ApiError(409, 'INVALID_STATE', '現場協助已完成，不能採納回答');
 
     const amount = config.points.answerAccepted;
     db.transaction(() => {
@@ -187,7 +190,8 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
     const before = voteEffect(previous);
     const after = voteEffect(next);
     adjustVotes.run(after.up - before.up, after.down - before.down, answer.id);
-    adjustTrust.run(after.trust - before.trust, answer.author_id);
+    // 對自己的回答按讚只影響讚數，不加可信度，避免自己刷分。
+    if (userId !== answer.author_id) adjustTrust.run(after.trust - before.trust, answer.author_id);
   });
 
   router.put('/answers/:id/vote', (req, res) => {
@@ -195,7 +199,7 @@ export function answerRoutes({ db, config, serializers, notifier, getRealtime, l
     if (!answer) throw notFound();
     const value = requireBodyObject(req.body).value;
     if (value !== 1 && value !== -1) throw validationError('value 必須是 1 或 -1', { field: 'value' });
-    if (answer.author_id === req.user.id) throw new ApiError(403, 'SELF_ACTION_NOT_ALLOWED', '不能投自己的回答');
+    if (answer.author_id === req.user.id && value === -1) throw new ApiError(403, 'SELF_ACTION_NOT_ALLOWED', '不能對自己的回答投倒讚');
     changeVote(answer, req.user.id, value);
     signalAnswers(answer.question_id);
     res.json({ data: serializers.voteSummary(answerById.get(answer.id), req.user.id) });

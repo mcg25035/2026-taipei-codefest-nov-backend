@@ -4,3 +4,5 @@ node_modules/
 frpc.toml
 # 官方 repo 的 clone，上游：https://github.com/taipei-doit/TownPass
 TownPass/
+# Firebase 服務帳號金鑰
+*firebase-adminsdk*.json

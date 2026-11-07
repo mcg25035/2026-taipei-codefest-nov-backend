@@ -19,13 +19,14 @@
 | 協助方式 | 線上或到現場，Geo 用於配對附近的人 |
 | 任務板 | 問題列表的遊戲化呈現，不是另一套系統 |
 | 發問內容 | 文字、照片、語音；城市通內的頁面情境自動帶入 |
+| 分類 | 發問者可不選分類，由伺服器的分類器判斷；信心低於 70% 時為 `uncategorized`，由志工分類。志工只能改未分類的問題 |
 | 語言 | 記錄語言供篩選，不做自動翻譯 |
 | 獎勵 | 積分與徽章，可分享；實質獎勵由營運方決定 |
-| 讚與倒讚 | 倒讚數學 YouTube 不公開，避免情緒性倒讚；API 不回傳，只在後端用於排序和可信度評分 |
+| 讚與倒讚 | 所有登入者都能投票；倒讚數學 YouTube 不公開，避免情緒性倒讚，API 不回傳，只在後端用於排序和可信度評分 |
 | 位置分享 | 三個等級：完全關閉、模糊位置、具體位置 |
 | 即時更新 | 資料全走 REST；Socket.IO 只通知前端重抓，個人通知走 SSE |
 | 平台 | 只做 Android，不做 iOS 和 APNs |
-| 通知管道 | SSE、前景服務、背景輪詢，不使用 Firebase |
+| 通知管道 | App 連線時走 SSE，否則走 FCM，heartbeat 當備援 |
 
 ### 暫定預設值
 
@@ -81,10 +82,12 @@ Flutter App ──heartbeat / SSE─────────┘
 open ──接案──> in_progress ──發問者確認完成──> resolved
   ^                │
   └──── 取消 ──────┘
-open ──採納回答──> resolved
+open ──採納回答或發問者標記已解決──> resolved
 ```
 
 - `answer_count` 表示是否有人回答，不另設狀態。
+- 已解決和回答是分開的：發問者可用 `POST /questions/{id}/resolve` 直接標記，不需要留言或採納，也不會發積分。
+- 標記已解決後，仍可回答、按讚和採納。
 - 撤回後的問題一律回傳 404。
 - 有進行中的現場協助時不能採納回答，回傳 `ASSIST_ACTIVE`。
 
@@ -123,11 +126,14 @@ claimed ──接案者抵達──> arrived ──發問者確認──> comple
 
 | 情況 | 管道 |
 |---|---|
-| App 開啟中 | `GET /notifications/stream`（SSE） |
-| App 在背景或關閉 | 前景服務維持 `GET /notifications/stream`，由 App 顯示本機通知 |
-| 連線中斷時的備援 | 定時呼叫 `POST /me/heartbeat` 取回未送達的通知 |
+| App 連著 `GET /notifications/stream` | SSE，不另外推播 |
+| 其他情況 | FCM 推播，App 關閉也收得到 |
+| FCM 全部失敗時 | 留給 `POST /me/heartbeat` 取回 |
 
-前景服務需要常駐通知，部分手機品牌仍可能結束它，所以要保留 heartbeat 當備援。Demo 前要用實機測試。
+- App 登入後呼叫 `PUT /devices/{installation_id}` 註冊 FCM token，登出時呼叫 `DELETE`。
+- 同一個 token 只對應一位使用者，換帳號時舊帳號的推播會立刻停止。
+- 推播內容會經過 Google，所以**不帶精確位置**；`data` 只有 `notification_id`、`type`、`question_id`，App 再用 `GET /notifications` 取完整內容。
+- 少數情況可能收到兩次相同通知，App 要用 `notification_id` 去重。
 
 城市通的 `notify` 會比對「已訂閱」和「已取消訂閱」字樣來改動訂閱清單，通知文字要避開這些開頭。
 
@@ -217,7 +223,7 @@ data: {"id":"n_1","type":"new_answer","title":"有人回答了你的問題", ...
 
 ## 實作狀態
 
-規格內的 32 支 API 都已實作，進度與限制見 [`backend/README.md`](../../backend/README.md)。
+規格內的 37 支 API 都已實作，進度與限制見 [`backend/README.md`](../../backend/README.md)。
 
 ## 不在範圍內
 

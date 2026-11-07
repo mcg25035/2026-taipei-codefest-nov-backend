@@ -18,6 +18,10 @@ import { assistRoutes } from './routes/assists.js';
 import { piiRoutes } from './routes/pii.js';
 import { questionRoutes } from './routes/questions.js';
 import { publicRewardRoutes, publicRewardApiRoutes, rewardRoutes } from './routes/rewards.js';
+import { createClassifier } from './classifier.js';
+import { classifyRoutes, classifyTestPage } from './routes/classify.js';
+import { createPush } from './push.js';
+import { deviceRoutes } from './routes/devices.js';
 import { createRewards } from './rewards.js';
 import { createSignatures } from './signatures.js';
 import { createSerializers } from './serialize.js';
@@ -35,9 +39,11 @@ export function createServer(overrides = {}) {
   realtime = createRealtime({ httpServer, db, auth, config, serializeNotification });
 
   const signatures = createSignatures({ db, config });
-  const notifier = createNotifier({ db, config, getRealtime });
+  const push = createPush({ db, config });
+  const notifier = createNotifier({ db, config, getRealtime, push });
   const deps = {
     db, config, getRealtime, notifier, signatures,
+    classifier: config.classifierOverride ?? createClassifier(),
     serializers: createSerializers({ db, config, signatures }),
     rewards: createRewards({ db, config, notifier }),
     limiter: createRateLimiter(config.rateLimit.windowMs),
@@ -54,13 +60,16 @@ export function createServer(overrides = {}) {
 
   app.use(publicMediaRoutes(deps));
   app.use(publicRewardRoutes(deps));
+  app.use(classifyTestPage());
 
   const api = express.Router();
   api.use(metaRoutes(deps));
   api.use(publicSessionRoutes(deps));
   api.use(publicRewardApiRoutes(deps));
+  api.use(classifyRoutes(deps));
   api.use(auth.requireAuth);
   api.use(meRoutes(deps));
+  api.use(deviceRoutes(deps));
   api.use(mediaRoutes(deps));
   api.use(questionRoutes(deps));
   api.use(answerRoutes(deps));
@@ -74,6 +83,7 @@ export function createServer(overrides = {}) {
   app.use(errorMiddleware);
 
   const cleanup = startMediaCleanup(deps);
+  if (push.enabled) console.log('FCM push enabled');
 
   return {
     httpServer,
@@ -82,6 +92,7 @@ export function createServer(overrides = {}) {
     async close() {
       clearInterval(cleanup);
       await realtime.close();
+      await push.close();
       await new Promise((resolve) => httpServer.close(resolve));
       db.close();
     },

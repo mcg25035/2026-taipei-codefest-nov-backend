@@ -42,7 +42,7 @@ function parseQuestionLocation(body, level, mode) {
   return { approx: snap(location), exact: level === 'exact' || mode !== 'online' ? location : null };
 }
 
-export function questionRoutes({ db, config, serializers, notifier, getRealtime, limiter, removeMediaFiles }) {
+export function questionRoutes({ db, config, serializers, notifier, getRealtime, limiter, removeMediaFiles, classifier }) {
   const router = Router();
   const byId = db.prepare('SELECT * FROM questions WHERE id = ?');
   const byRequest = db.prepare('SELECT * FROM questions WHERE author_id = ? AND client_request_id = ?');
@@ -55,6 +55,17 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
   const attach = db.prepare(`
     UPDATE media SET question_id = ?, position = ? WHERE id = ? AND owner_id = ? AND question_id IS NULL AND answer_id IS NULL
   `);
+
+  // 分類只是輔助，出錯時不可以擋住發問。
+  const autoCategory = (text) => {
+    if (!text.trim()) return 'uncategorized';
+    try {
+      return classifier.classify(text).category;
+    } catch (err) {
+      console.error(`classifier error: ${err.message}`);
+      return 'uncategorized';
+    }
+  };
 
   router.post('/questions', (req, res) => {
     const body = requireBodyObject(req.body);
@@ -70,7 +81,10 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     const level = requireEnum(body.location_sharing ?? req.user.location_sharing, LOCATION_LEVELS, 'location_sharing');
     const { approx, exact } = parseQuestionLocation(body, level, mode);
     const context = parseContext(body.context);
-    const category = requireEnum(body.category, Object.keys(CATEGORIES), 'category');
+    // 發問者可以不選分類，降低長輩的負擔。分類器有把握才自動分類，否則留給志工。
+    const category = body.category === undefined || body.category === null
+      ? autoCategory(`${optionalString(body, 'title', { max: 80 }) ?? ''} ${text ?? ''}`)
+      : requireEnum(body.category, Object.keys(CATEGORIES), 'category');
     const language = parseLanguage(body.language);
     const customTitle = optionalString(body, 'title', { max: 80 });
     const title = customTitle || (text?.trim() ? firstChars(text.trim(), 30) : '圖片或語音問題');
@@ -176,6 +190,45 @@ export function questionRoutes({ db, config, serializers, notifier, getRealtime,
     const row = byId.get(req.params.id);
     if (!row) throw notFound();
     res.json({ data: serializers.questionDetail(req, row) });
+  });
+
+  const markResolved = db.prepare(`
+    UPDATE questions SET status = 'resolved', exact_lat = NULL, exact_lng = NULL WHERE id = ?
+  `);
+  const purgeNotificationLocation = db.prepare('UPDATE notifications SET exact_lat = NULL, exact_lng = NULL WHERE question_id = ?');
+
+  // 已解決不綁定回答：不需要留言或採納，也不會發積分。
+  router.post('/questions/:id/resolve', (req, res) => {
+    const row = byId.get(req.params.id);
+    if (!row) throw notFound();
+    if (row.author_id !== req.user.id) throw forbidden('只有發問者可以標記已解決');
+    if (row.status === 'in_progress') throw new ApiError(409, 'ASSIST_ACTIVE', '現場協助進行中，請先確認完成或取消');
+    if (row.status !== 'open') throw new ApiError(409, 'INVALID_STATE', '這個問題已經解決了');
+    db.transaction(() => {
+      markResolved.run(row.id);
+      purgeNotificationLocation.run(row.id);
+    })();
+    getRealtime().questionChanged(row.id);
+    getRealtime().feedChanged();
+    res.json({ data: serializers.questionDetail(req, byId.get(row.id)) });
+  });
+
+  const updateCategory = db.prepare('UPDATE questions SET category = ? WHERE id = ?');
+
+  // 志工只能替未分類的問題分類，避免已分類的問題被亂改；發問者隨時可以改。
+  router.put('/questions/:id/category', (req, res) => {
+    const row = byId.get(req.params.id);
+    if (!row) throw notFound();
+    const assignable = Object.keys(CATEGORIES).filter((c) => c !== 'uncategorized');
+    const category = requireEnum(requireBodyObject(req.body).category, assignable, 'category');
+    if (row.author_id !== req.user.id) {
+      if (req.user.trust_score < config.trust.lowThreshold) throw forbidden('目前不能替問題分類');
+      if (row.category !== 'uncategorized') throw new ApiError(409, 'INVALID_STATE', '這個問題已經分類過了');
+    }
+    updateCategory.run(category, row.id);
+    getRealtime().questionChanged(row.id);
+    getRealtime().feedChanged();
+    res.json({ data: serializers.questionDetail(req, byId.get(row.id)) });
   });
 
   const activeAssist = db.prepare("SELECT * FROM assists WHERE question_id = ? AND status IN ('claimed', 'arrived')");

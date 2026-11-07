@@ -119,6 +119,14 @@ CREATE TABLE IF NOT EXISTS user_badges (
   earned_at TEXT NOT NULL,
   PRIMARY KEY (user_id, badge_id)
 );
+CREATE TABLE IF NOT EXISTS devices (
+  installation_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  fcm_token TEXT NOT NULL UNIQUE,
+  app_version TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL

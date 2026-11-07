@@ -19,6 +19,10 @@ npm test
 
 設定值見 `.env.example`，要透過環境變數傳入，例如 `PORT=8080 npm start`；也可以用 `node --env-file=.env src/server.js`。資料存在 `DATA_DIR`（預設 `./data`），包含 `app.db` 和 `media/`，要備份時整個目錄一起備份。
 
+## 推播
+
+用 `FIREBASE_SERVICE_ACCOUNT_FILE` 指定 Firebase 服務帳號金鑰的路徑；未設定時不發推播，其他功能照常。金鑰不可進版控，`.gitignore` 已排除 `*firebase-adminsdk*.json`。
+
 ## 放在反向代理後面
 
 - 要轉送 WebSocket（`/socket.io/`），Socket.IO 才能用 WebSocket 連線。
@@ -28,9 +32,9 @@ npm test
 
 ## 目前進度
 
-`docs/api/openapi.yaml` 的 32 支 API 和 Socket.IO 訊號都已實作，也都有整合測試。只支援 Android，所以沒有 APNs 和裝置註冊。
+`docs/api/openapi.yaml` 的 37 支 API 和 Socket.IO 訊號都已實作，也都有整合測試。只支援 Android，推播走 FCM，沒有 APNs。
 
-另外提供三個不在 `/api/v1` 下的公開路由：`GET /media/{id}`、`GET /badges/{id}.svg`、`GET /share/{user_id}/{badge_id}`。
+另外提供三個不在 `/api/v1` 下的公開路由：`GET /media/{id}`、`GET /badges/{id}.svg`、`GET /share/{user_id}/{badge_id}`，以及分類器測試頁 `GET /classify-test`。
 
 ## 目前的限制
 
