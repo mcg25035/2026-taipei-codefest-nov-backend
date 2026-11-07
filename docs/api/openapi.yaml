@@ -1214,6 +1214,63 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
 
+  /admin/analytics/pages:
+    get:
+      tags: [Admin]
+      summary: 依頁面統計問題數
+      description: |
+        用問題的 `context.page_route` 統計哪些頁面最常被問，依問題數排序。
+        帶 `+dialog`、`+sheet` 的路由算同一個頁面。已撤回或刪除的問題不會計入。
+      operationId: adminAnalyticsPages
+      parameters:
+        - { name: since, in: query, description: 起始時間（ISO 8601）, schema: { type: string, format: date-time } }
+        - { name: until, in: query, description: 結束時間（ISO 8601）, schema: { type: string, format: date-time } }
+        - { name: service_id, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [total_questions, questions_with_page, questions_without_page, pages]
+                    properties:
+                      total_questions: { type: integer }
+                      questions_with_page: { type: integer }
+                      questions_without_page: { type: integer, description: 沒有帶頁面資訊，例如直接從論壇發問 }
+                      pages:
+                        type: array
+                        items:
+                          type: object
+                          required: [service_id, service_name, page_route, page_title, question_count, open_count, in_progress_count, resolved_count, unanswered_count, categories, last_asked_at]
+                          properties:
+                            service_id: { type: string }
+                            service_name: { type: string }
+                            page_route: { type: string }
+                            page_title: { type: [string, 'null'] }
+                            question_count: { type: integer }
+                            open_count: { type: integer }
+                            in_progress_count: { type: integer }
+                            resolved_count: { type: integer }
+                            unanswered_count: { type: integer }
+                            categories:
+                              type: array
+                              items:
+                                type: object
+                                required: [category, count]
+                                properties:
+                                  category: { $ref: '#/components/schemas/Category' }
+                                  count: { type: integer }
+                            last_asked_at: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
   /admin/audit-log:
     get:
       tags: [Admin]
@@ -1523,7 +1580,7 @@ components:
         extra:
           type: object
           additionalProperties: true
-          description: 由各功能自訂，最大 2 KB
+          description: 由各功能自訂，最大 8 KB。**所有登入者都拿得到，前端不要顯示**
 
     CreateQuestionRequest:
       type: object

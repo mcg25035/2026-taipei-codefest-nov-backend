@@ -153,6 +153,75 @@ export function adminRoutes({ db, audit, serializers, notifier, getRealtime, req
     res.json({ data: serializers.answer(req, answerById.get(row.id)) });
   });
 
+  const parseDate = (query, field) => {
+    if (query[field] === undefined) return null;
+    const time = Date.parse(String(query[field]));
+    if (Number.isNaN(time)) throw validationError(`${field} 必須是有效的時間`, { field });
+    return new Date(time).toISOString();
+  };
+  // 開著對話框（+dialog、+sheet）仍算同一個頁面。
+  const pageKey = (route) => (route ?? '').replace(/\+[a-z]+$/i, '') || null;
+
+  router.get('/analytics/pages', (req, res) => {
+    const limit = parseLimit(req.query);
+    const since = parseDate(req.query, 'since');
+    const until = parseDate(req.query, 'until');
+    const clauses = [];
+    const params = {};
+    if (since) { clauses.push('created_at >= @since'); params.since = since; }
+    if (until) { clauses.push('created_at <= @until'); params.until = until; }
+    if (req.query.service_id !== undefined) { clauses.push('service_id = @service'); params.service = String(req.query.service_id); }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = db.prepare(`SELECT context, status, category, answer_count, created_at FROM questions ${where} ORDER BY created_at`).all(params);
+
+    const pages = new Map();
+    let withoutPage = 0;
+    for (const row of rows) {
+      const context = row.context ? JSON.parse(row.context) : null;
+      const route = pageKey(context?.page_route);
+      if (!route) { withoutPage++; continue; }
+      const key = `${context.service_id}\n${route}`;
+      if (!pages.has(key)) {
+        pages.set(key, {
+          service_id: context.service_id,
+          service_name: context.service_name,
+          page_route: route,
+          page_title: null,
+          question_count: 0,
+          open_count: 0,
+          in_progress_count: 0,
+          resolved_count: 0,
+          unanswered_count: 0,
+          categories: {},
+          last_asked_at: null,
+        });
+      }
+      const page = pages.get(key);
+      page.page_title = context.page_title ?? page.page_title;
+      page.question_count++;
+      page[`${row.status}_count`]++;
+      if (row.answer_count === 0) page.unanswered_count++;
+      page.categories[row.category] = (page.categories[row.category] ?? 0) + 1;
+      page.last_asked_at = row.created_at;
+    }
+    res.json({
+      data: {
+        total_questions: rows.length,
+        questions_with_page: rows.length - withoutPage,
+        questions_without_page: withoutPage,
+        pages: [...pages.values()]
+          .sort((a, b) => b.question_count - a.question_count || (b.last_asked_at > a.last_asked_at ? 1 : -1))
+          .slice(0, limit)
+          .map((p) => ({
+            ...p,
+            categories: Object.entries(p.categories)
+              .map(([category, count]) => ({ category, count }))
+              .sort((a, b) => b.count - a.count),
+          })),
+      },
+    });
+  });
+
   router.get('/audit-log', (req, res) => {
     const limit = parseLimit(req.query);
     const cursor = decodeCursor(req.query.cursor);

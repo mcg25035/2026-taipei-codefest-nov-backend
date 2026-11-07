@@ -1,6 +1,6 @@
 # 後端 API 規格
 
-這份文件列出後端全部 47 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
+這份文件列出後端全部 48 支 API、即時事件和資料結構，給串接的前端和 Flutter 使用。
 
 - **Base URL：** `https://tpcodefest.mcloudtw.com/api/v1`
 - **平台：** 只支援 Android
@@ -174,6 +174,7 @@ SSE 負責即時更新畫面。推播由 FCM 負責，兩者都會收到同一�
 | PATCH | `/admin/questions/{question_id}` | 修改問題內容 | 是 |
 | PATCH | `/admin/answers/{answer_id}` | 修改回答內容 | 是 |
 | GET | `/admin/pii-reports` | 列出所有個資標記 | 是 |
+| GET | `/admin/analytics/pages` | 依頁面統計問題數 | 是 |
 | GET | `/admin/audit-log` | 稽核紀錄 | 是 |
 | GET | `/meta` | 前端需要的列舉與限制 | 否 |
 | GET | `/healthz` | 健康檢查 | 否 |
@@ -1171,6 +1172,48 @@ token 會因重裝 App、清除資料或 FCM 輪替而改變，且 App 不會主
 
 - 錯誤：`400`、`401`、`403`
 
+### GET /admin/analytics/pages
+
+依頁面統計問題數。
+
+用問題的 `context.page_route` 統計哪些頁面最常被問，依問題數排序。
+帶 `+dialog`、`+sheet` 的路由算同一個頁面。已撤回或刪除的問題不會計入。
+
+**參數**
+
+| 名稱 | 位置 | 型別 | 必填 | 說明 |
+|---|---|---|---|---|
+| `since` | query | string（時間） |  | 起始時間（ISO 8601） |
+| `until` | query | string（時間） |  | 結束時間（ISO 8601） |
+| `service_id` | query | string |  |  |
+| `limit` | query | integer |  | 最小 1，最大 50，預設 `20` |
+
+**回應**
+
+- `200`：OK；`data` 是 object
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `total_questions` | integer | 是 |  |
+| `questions_with_page` | integer | 是 |  |
+| `questions_without_page` | integer | 是 | 沒有帶頁面資訊，例如直接從論壇發問 |
+| `pages` | object[] | 是 |  |
+| `pages[].service_id` | string | 是 |  |
+| `pages[].service_name` | string | 是 |  |
+| `pages[].page_route` | string | 是 |  |
+| `pages[].page_title` | string \| null | 是 |  |
+| `pages[].question_count` | integer | 是 |  |
+| `pages[].open_count` | integer | 是 |  |
+| `pages[].in_progress_count` | integer | 是 |  |
+| `pages[].resolved_count` | integer | 是 |  |
+| `pages[].unanswered_count` | integer | 是 |  |
+| `pages[].categories` | object[] | 是 |  |
+| `pages[].categories[].category` | [Category](#category) | 是 |  |
+| `pages[].categories[].count` | integer | 是 |  |
+| `pages[].last_asked_at` | string（時間） | 是 |  |
+
+- 錯誤：`400`、`401`、`403`
+
 ### GET /admin/audit-log
 
 稽核紀錄。
@@ -1479,7 +1522,7 @@ BCP 47 語言標籤
 | `service_name` | string | 是 |  |
 | `page_route` | string |  |  |
 | `page_title` | string |  |  |
-| `extra` | object |  | 由各功能自訂，最大 2 KB |
+| `extra` | object |  | 由各功能自訂，最大 8 KB。**所有登入者都拿得到，前端不要顯示** |
 
 ### CreateQuestionRequest
 

@@ -1690,3 +1690,54 @@ describe('身份與管理員', () => {
     }
   });
 });
+
+describe('頁面問題統計', () => {
+  test('依頁面彙整、排序、篩選，只有管理員能看', async () => {
+    const s = await startTestServer({ adminTownpassIds: ['root'] });
+    try {
+      const login = async (id) => (await s.call('POST', '/sessions', { body: { townpass_user_id: id, nickname: id } })).body.data;
+      const admin = await login('root');
+      const user = await login('someone');
+      const ask2 = async (route, extra = {}) => (await s.call('POST', '/questions', {
+        token: user.token,
+        body: s.question({ context: route && { service_id: 'townpass-app', service_name: 'Town Pass', page_route: route, page_title: '帳單' }, ...extra }),
+      })).body.data;
+
+      const a = await ask2('/fee-payment', { category: 'admin_procedure' });
+      await ask2('/fee-payment+dialog', { category: 'other' });
+      await ask2('/fee-payment?id=123', { category: 'other' });
+      await ask2('/account', { category: 'app_usage' });
+      await ask2(null);
+      await s.call('POST', '/questions/{question_id}/resolve', { token: user.token, params: { question_id: a.id } });
+
+      const get = (query = {}, token = admin.token) => s.call('GET', '/admin/analytics/pages', { token, query });
+      assert.equal((await get({}, user.token)).status, 403);
+      const { data } = (await get()).body;
+      assert.equal(data.total_questions, 5);
+      assert.equal(data.questions_with_page, 4);
+      assert.equal(data.questions_without_page, 1);
+      assert.deepEqual(data.pages.map((p) => [p.page_route, p.question_count]), [['/fee-payment', 3], ['/account', 1]]);
+      const [top] = data.pages;
+      assert.equal(top.resolved_count, 1);
+      assert.equal(top.open_count, 2);
+      assert.equal(top.unanswered_count, 3);
+      assert.equal(top.page_title, '帳單');
+      assert.deepEqual(top.categories, [{ category: 'other', count: 2 }, { category: 'admin_procedure', count: 1 }]);
+
+      assert.equal((await get({ limit: '1' })).body.data.pages.length, 1);
+      assert.equal((await get({ until: '2020-01-01T00:00:00Z' })).body.data.total_questions, 0);
+      assert.equal((await get({ since: '2020-01-01T00:00:00Z' })).body.data.total_questions, 5);
+      assert.equal((await get({ service_id: 'nope' })).body.data.total_questions, 0);
+      assert.equal((await get({ since: 'not-a-date' })).status, 400);
+    } finally {
+      await s.stop();
+    }
+  });
+
+  test('report_draft 常見的 extra 大小可以存，超過 8 KB 才拒絕', async () => {
+    const user = await t.login();
+    const body = (size) => t.question({ context: { service_id: 'townpass-app', service_name: 'Town Pass', page_route: '/x', extra: { routeHistory: 'x'.repeat(size) } } });
+    assert.equal((await t.call('POST', '/questions', { token: user.token, body: body(4000) })).status, 201);
+    assert.equal((await t.call('POST', '/questions', { token: user.token, body: body(9000) })).status, 400);
+  });
+});

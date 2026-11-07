@@ -22,8 +22,8 @@ function parseContext(value) {
   const title = optionalString(value, 'page_title', { max: 128 });
   if (title) context.page_title = title;
   if (value.extra !== undefined) {
-    if (!isObject(value.extra) || Buffer.byteLength(JSON.stringify(value.extra)) > 2048) {
-      throw validationError('context.extra 必須是 2 KB 以內的物件', { field: 'context.extra' });
+    if (!isObject(value.extra) || Buffer.byteLength(JSON.stringify(value.extra)) > 8192) {
+      throw validationError('context.extra 必須是 8 KB 以內的物件', { field: 'context.extra' });
     }
     context.extra = value.extra;
   }
