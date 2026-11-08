@@ -34,7 +34,7 @@ export function loadConfig(overrides = {}) {
     },
     // 文字向量服務；未設定時不啟用語意快取。
     embeddingUrl: env.EMBEDDING_URL?.replace(/\/$/, '') || null,
-    semanticCacheThreshold: Number(env.SEMANTIC_CACHE_THRESHOLD ?? 0.88),
+    semanticCacheThreshold: Number(env.SEMANTIC_CACHE_THRESHOLD ?? 0.92),
     embeddingBackfillMs: 60_000,
     // 回覆後多久內標記已解決，才算機器人解決的。
     cacheResolveWindowMs: 10 * 60_000,

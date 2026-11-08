@@ -24,7 +24,7 @@
 | `ADMIN_TOWNPASS_IDS` | 逗號分隔的 ID | 登入時取得管理員身份。**不要寫進 repo**，目前知道 ID 就能登入 |
 | `BOT_TOWNPASS_IDS` | 逗號分隔的 ID | 登入時取得機器人身份 |
 | `EMBEDDING_URL` | `http://127.0.0.1:5122` | 語意快取的模型服務；不設定就不啟用 |
-| `SEMANTIC_CACHE_THRESHOLD` | 預設 `0.88` | 越高越不容易誤答，也越不容易命中 |
+| `SEMANTIC_CACHE_THRESHOLD` | 預設 `0.92` | 越高越不容易誤答，也越不容易命中 |
 | `DATA_DIR` | 預設 `./data` | 資料庫和媒體檔 |
 | `CORS_ORIGIN` | 預設 `*` | 正式上線要改成前端網域 |
 | `FCM_CHANNEL_ID` | 預設值 | 要和 App 的通知通道一致 |
@@ -53,7 +53,7 @@ frp 沒在跑時，在 repo 根目錄執行 `frpc -c ./frpc.toml`。
 
 ## 語意快取的模型服務
 
-模型是 gte-multilingual-base 的量化 ONNX，約 340 MB，執行時約佔 900 MB 記憶體。服務只聽本機，**不可對外開放**。沒開也不影響發問，只是不會自動回覆，恢復後會補算舊問題。
+模型是 multilingual-e5-large（MIT 授權）的量化 ONNX，約 560 MB，載入後約佔 1.1 GB 記憶體，尖峰約 2.5 GB。換模型後要清空 `question_embeddings`，否則新舊向量會混在一起比對。服務只聽本機，**不可對外開放**。沒開也不影響發問，只是不會自動回覆，恢復後會補算舊問題。
 
 首次安裝：
 

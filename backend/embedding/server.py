@@ -12,7 +12,7 @@ import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer
 
-MODEL_NAME = "gte-multilingual-base-q8"
+MODEL_NAME = "multilingual-e5-large-q8"
 MODEL_DIR = Path(__file__).parent / "model"
 MAX_TOKENS = 512
 MAX_BODY_BYTES = 64 * 1024
@@ -25,13 +25,14 @@ tokenizer = Tokenizer.from_file(str(MODEL_DIR / "tokenizer.json"))
 
 
 def embed(text):
-    ids = tokenizer.encode(text).ids[:MAX_TOKENS]
+    # e5 要求文字前加上用途前綴；問題互相比對時，兩邊都用 query。
+    ids = tokenizer.encode("query: " + text).ids[:MAX_TOKENS]
     feed = {
         "input_ids": np.array([ids], dtype=np.int64),
         "attention_mask": np.ones((1, len(ids)), dtype=np.int64),
     }
-    # 這個模型用第一個 token（CLS）當整句的向量。
-    vector = session.run(None, feed)[0][0][0]
+    # 這個模型用所有 token 的平均當整句的向量。
+    vector = session.run(None, feed)[0][0].mean(axis=0)
     return (vector / np.linalg.norm(vector)).tolist()
 
 
